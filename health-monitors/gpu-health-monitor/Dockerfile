@@ -13,10 +13,14 @@
 # limitations under the License.
 
 ARG DCGM_VERSION="4.2.0-1-ubuntu22.04"
+ARG VERSION="dev"
+ARG GIT_COMMIT="none"
+ARG BUILD_DATE=$(date -u +%FT%TZ)
+
 FROM public.ecr.aws/docker/library/python:3.10-bookworm AS build
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install poetry==1.8.2
+    pip install poetry==2.2.1
 
 ENV POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_IN_PROJECT=1 \
@@ -25,10 +29,16 @@ ENV POETRY_NO_INTERACTION=1 \
 
 WORKDIR /app
 
+# Build commons-python wheel (only production deps needed)
+COPY commons-python/logger/ /commons-python/logger/
+RUN --mount=type=cache,target=/tmp/poetry_cache \
+    cd /commons-python/logger && poetry build --format wheel
+
+# Build gpu-health-monitor wheel
 COPY health-monitors/gpu-health-monitor/ .
 RUN --mount=type=cache,target=/tmp/poetry_cache \
-    poetry build --format wheel 
-RUN poetry export --format requirements.txt --output constraints.txt --without-hashes
+    poetry remove commons-python && \
+    poetry build --format wheel
 
 
 FROM nvcr.io/nvidia/cloud-native/dcgm:${DCGM_VERSION} AS runtime
@@ -47,10 +57,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -rf /var/lib/apt/lists/*
 
 ARG PYTHONPATH="/usr/share/datacenter-gpu-manager-4/bindings/python3"
-ENV PYTHONPATH=${PYTHONPATH} \
-    PYTHONUNBUFFERED=1
+ARG VERSION
+ARG GIT_COMMIT
+ARG BUILD_DATE
 
+ENV PYTHONPATH=${PYTHONPATH} \
+    PYTHONUNBUFFERED=1 \
+    VERSION=${VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    BUILD_DATE=${BUILD_DATE}
+
+# Copy and install both wheels
+COPY --from=build /commons-python/logger/dist/*.whl ./
 COPY --from=build /app/dist/*.whl ./
-COPY --from=build /app/constraints.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install ./gpu_health_monitor*.whl --constraint constraints.txt
+    pip install ./commons_python*.whl ./gpu_health_monitor*.whl
