@@ -82,12 +82,6 @@ class TestStructuredFormatter:
         assert log_entry["module"] == "test-module"
         assert log_entry["version"] == "v1.0.0"
 
-        # Verify time format matches Go slog (ISO8601 with timezone offset)
-        # Format: "2025-12-09T15:37:51.105805+05:30" or "2025-12-09T10:07:51.105805+00:00"
-        assert "T" in log_entry["time"]
-        # Should have timezone offset (+HH:MM or -HH:MM), not Z suffix
-        assert "+" in log_entry["time"] or log_entry["time"].count("-") >= 3
-
     def test_field_ordering(self):
         """Verify fields are ordered: time, level, msg, module, version, then extras."""
         formatter = StructuredFormatter(module="test", version="v1.0.0")

@@ -38,5 +38,5 @@ Output format matches Go slog:
 from logger.logger import set_default_structured_logger_with_level
 
 __version__ = "0.1.0"
-__all__ = ["set_default_structured_logger_with_level", "__version__"]
+__all__ = ["__version__", "set_default_structured_logger_with_level"]
 

@@ -31,7 +31,7 @@ The log format matches Go's slog JSON output:
 
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Final
 
 from pythonjsonlogger import jsonlogger
@@ -81,10 +81,11 @@ class StructuredFormatter(jsonlogger.JsonFormatter):
         super().add_fields(log_record, record, message_dict)
 
         # Format timestamp to match Go's slog JSONHandler format exactly:
-        # RFC3339 with nanosecond precision and local timezone offset
+        # RFC3339 with microsecond precision and local timezone offset
         # Go output: "2025-12-09T15:37:51.105805414+05:30"
         # Python output: "2025-12-09T15:37:51.105805+05:30" (microseconds, 6 digits)
-        log_record["time"] = datetime.now().astimezone().isoformat()
+        # Use record.created (event time) instead of datetime.now() (formatting time)
+        log_record["time"] = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone().isoformat()
         
         # Use uppercase level names to match Go slog
         log_record["level"] = record.levelname.upper()
