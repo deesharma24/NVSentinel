@@ -14,6 +14,7 @@
 
 ARG DCGM_VERSION="4.2.0-1-ubuntu22.04"
 ARG VERSION="0.1.0"
+# GIT_COMMIT and BUILD_DATE are passed by CI (make/docker.mk) for OCI annotations
 ARG GIT_COMMIT="none"
 ARG BUILD_DATE=$(date -u +%FT%TZ)
 
@@ -55,15 +56,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -rf /var/lib/apt/lists/*
 
 ARG PYTHONPATH="/usr/share/datacenter-gpu-manager-4/bindings/python3"
-ARG VERSION
-ARG GIT_COMMIT
-ARG BUILD_DATE
 
 ENV PYTHONPATH=${PYTHONPATH} \
-    PYTHONUNBUFFERED=1 \
-    VERSION=${VERSION} \
-    GIT_COMMIT=${GIT_COMMIT} \
-    BUILD_DATE=${BUILD_DATE}
+    PYTHONUNBUFFERED=1
 
 COPY --from=build /app/dist/*.whl ./
 COPY --from=build /app/constraints.txt ./
