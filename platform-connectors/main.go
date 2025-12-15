@@ -26,6 +26,10 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/util/json"
+
 	"github.com/nvidia/nvsentinel/commons/pkg/auditlogger"
 	"github.com/nvidia/nvsentinel/commons/pkg/flags"
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
@@ -38,10 +42,6 @@ import (
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	_ "github.com/nvidia/nvsentinel/platform-connectors/pkg/transformers/metadata"
 	_ "github.com/nvidia/nvsentinel/platform-connectors/pkg/transformers/overrides"
-	"golang.org/x/sync/errgroup"
-
-	"google.golang.org/grpc"
-	"k8s.io/apimachinery/pkg/util/json"
 )
 
 const (
@@ -210,7 +210,7 @@ func startGRPCServer(
 	}
 
 	// Set socket permissions to allow other processes to connect (0666 = rw-rw-rw-)
-	if err := os.Chmod(socket, 0666); err != nil {
+	if err := os.Chmod(socket, 0o666); err != nil {
 		return nil, fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
