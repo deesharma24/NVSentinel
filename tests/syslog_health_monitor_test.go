@@ -181,7 +181,7 @@ func TestSyslogHealthMonitorXIDDetection(t *testing.T) {
 
 // TestSyslogHealthMonitorXIDFloodAndTruncation tests two scenarios in sequence:
 // 1. First, injects duplicate XID errors and verifies they are all captured in the node condition (within 1KB, not truncated)
-// 2. Then, injects many more XIDs to exceed the 1KB limit and verifies truncation happens correctly
+// 2. Then, injects many more XIDs to exceed the 1KB limit and verifies truncation happens correctly with exactly one truncation suffix
 func TestSyslogHealthMonitorXIDFloodAndTruncation(t *testing.T) {
 	feature := features.New("Syslog Health Monitor - XID Flood and Truncation").
 		WithLabel("suite", "syslog-health-monitor").
@@ -308,25 +308,28 @@ func TestSyslogHealthMonitorXIDFloodAndTruncation(t *testing.T) {
 		return ctx
 	})
 
-	// Phase 2: Add 1-2 more XIDs to exceed 1KB and trigger truncation
+	// Phase 2: Add more XIDs to exceed 1KB and trigger truncation
 	// The previous XIDs from Phase 1 are still in the node condition, so we just need to add enough to exceed 1KB
+	// Also verifies that only one truncation suffix is present (no "...;...;..." accumulation)
 	feature.Assess("Phase 2: Add more XIDs to exceed 1KB and verify truncation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err, "failed to create kubernetes client")
 
 		nodeName := ctx.Value(keyNodeName).(string)
 
-		// Add 1 more fatal XID with a longer message to push over 1KB
-		// Phase 1 has ~850 bytes, this XID 119 adds ~250 bytes → total ~1100 bytes → triggers truncation
+		// Add more fatal XIDs to push over 1KB
+		// Phase 1 has ~850 bytes, these XIDs add ~400+ bytes → total ~1250+ bytes → triggers truncation
 		additionalXidMessages := []string{
 			// XID 119 - Longer GSP RPC timeout message (~250 bytes in condition)
 			"kernel: [16450076.435595] NVRM: Xid (PCI:0002:00:00): 119, pid=1582259, name=nvc:[driver], Timeout after 6s of waiting for RPC response from GPU1 GSP! Expected function 76 (GSP_RM_CONTROL) (0x20802a02 0x8).",
+			// XID 94 - Contained ECC error (additional to ensure truncation suffix doesn't accumulate)
+			"kernel: [16450076.435595] NVRM: Xid (PCI:0000:17:00): 94, pid=789012, name=process, Contained ECC error.",
 		}
 
-		t.Logf("Phase 2: Injecting %d additional XID message to exceed 1KB (added to existing 4 from Phase 1)", len(additionalXidMessages))
+		t.Logf("Phase 2: Injecting %d additional XID messages to exceed 1KB (added to existing 4 from Phase 1)", len(additionalXidMessages))
 		helpers.InjectSyslogMessages(t, stubJournalHTTPPort, additionalXidMessages)
 
-		t.Log("Verifying node condition message is truncated to 1KB limit")
+		t.Log("Verifying node condition message is truncated to 1KB limit with exactly one truncation suffix")
 		require.Eventually(t, func() bool {
 			condition, err := helpers.CheckNodeConditionExists(ctx, client, nodeName,
 				"SysLogsXIDError", "SysLogsXIDErrorIsNotHealthy")
@@ -355,13 +358,23 @@ func TestSyslogHealthMonitorXIDFloodAndTruncation(t *testing.T) {
 				return false
 			}
 
-			t.Logf("Phase 2 - Message length: %d bytes (exactly at or near 1KB limit), truncated with suffix '%s'",
-				messageLen, truncationSuffix)
+			// Check 4: Count occurrences of truncation suffix - should be exactly 1
+			// This ensures no "...;...;..." accumulation when adding events after truncation
+			suffixCount := strings.Count(condition.Message, truncationSuffix)
+			if suffixCount > 1 {
+				t.Logf("FAIL: Message contains %d truncation suffixes, expected exactly 1",
+					suffixCount)
+				t.Logf("Message: %s", condition.Message)
+				return false
+			}
+
+			t.Logf("Phase 2 - Message length: %d bytes, truncation suffix count: %d",
+				messageLen, suffixCount)
 			return true
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
-			"Node condition message should be truncated to 1KB with truncation suffix")
+			"Node condition message should be truncated to 1KB with exactly one truncation suffix")
 
-		t.Log("Phase 2 PASSED: Message correctly truncated to 1KB limit while preserving earlier XIDs")
+		t.Log("Phase 2 PASSED: Message correctly truncated to 1KB limit with single truncation suffix")
 		return ctx
 	})
 

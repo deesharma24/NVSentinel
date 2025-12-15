@@ -38,6 +38,7 @@ import (
 const (
 	DefaultNamespace   = "default"
 	NoHealthFailureMsg = "No Health Failures"
+	truncationSuffix   = "..."
 )
 
 //nolint:cyclop, gocognit
@@ -185,7 +186,7 @@ func (r *K8sConnector) parseMessages(message string) []string {
 	if message != "" && message != NoHealthFailureMsg {
 		elementMessages := strings.Split(message, ";")
 		for _, msg := range elementMessages {
-			if msg != "" {
+			if msg != "" && msg != truncationSuffix {
 				messages = append(messages, msg)
 			}
 		}
@@ -552,7 +553,6 @@ func isKubernetesStringError(errStr string) bool {
 // truncateNodeConditionMessage builds the node condition message while respecting the max node condition
 // message length. It preserves complete error entries and adds a truncation indicator if needed.
 func (r *K8sConnector) truncateNodeConditionMessage(messages []string) string {
-	truncationSuffix := "..."
 	maxLen := int(r.maxNodeConditionMessageLength) - len(truncationSuffix)
 
 	var result strings.Builder

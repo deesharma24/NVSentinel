@@ -383,6 +383,7 @@ func TestParseMessages(t *testing.T) {
 		{"", []string{}},
 		{"message1;", []string{"message1"}},
 		{"message1;message2;", []string{"message1", "message2"}},
+		{"message1;message2;...", []string{"message1", "message2"}},
 	}
 
 	for i, test := range tests {
@@ -1388,8 +1389,6 @@ func TestUpdateNodeConditions_ErrorHandling(t *testing.T) {
 	}
 }
 func TestTruncateConditionMessage(t *testing.T) {
-	const truncationSuffix = "..."
-
 	// Generate test messages that would exceed 1KB when combined
 	generateLongMessages := func(count int) []string {
 		var msgs []string
