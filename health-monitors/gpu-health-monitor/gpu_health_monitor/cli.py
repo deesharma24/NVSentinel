@@ -97,7 +97,7 @@ def cli(
     dcgm_errors_info_dict: dict[str, str] = {}
     dcgm_health_conditions_categorization_mapping_config = config["DCGMHealthConditionsCategorizationMapping"]
 
-    # Initialize structured JSON logging (matches Go slog format)
+    # Initialize structured JSON logging
     # Version should be injected at build time; "dev" is the default for local development
     version = os.getenv("VERSION", "dev")
     log_level = "debug" if verbose else os.getenv("LOG_LEVEL", "info")
