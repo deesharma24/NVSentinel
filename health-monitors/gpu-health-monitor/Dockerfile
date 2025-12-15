@@ -13,6 +13,10 @@
 # limitations under the License.
 
 ARG DCGM_VERSION="4.2.0-1-ubuntu22.04"
+ARG VERSION="dev"
+ARG GIT_COMMIT="none"
+ARG BUILD_DATE=$(date -u +%FT%TZ)
+
 FROM public.ecr.aws/docker/library/python:3.10-bookworm AS build
 
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -27,7 +31,7 @@ WORKDIR /app
 
 COPY health-monitors/gpu-health-monitor/ .
 RUN --mount=type=cache,target=/tmp/poetry_cache \
-    poetry build --format wheel 
+    poetry build --format wheel
 RUN poetry export --format requirements.txt --output constraints.txt --without-hashes
 
 
@@ -47,8 +51,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     rm -rf /var/lib/apt/lists/*
 
 ARG PYTHONPATH="/usr/share/datacenter-gpu-manager-4/bindings/python3"
+ARG VERSION
+ARG GIT_COMMIT
+ARG BUILD_DATE
+
 ENV PYTHONPATH=${PYTHONPATH} \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    VERSION=${VERSION} \
+    GIT_COMMIT=${GIT_COMMIT} \
+    BUILD_DATE=${BUILD_DATE}
 
 COPY --from=build /app/dist/*.whl ./
 COPY --from=build /app/constraints.txt ./
