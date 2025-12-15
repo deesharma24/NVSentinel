@@ -24,7 +24,7 @@ from gpu_health_monitor.logger import set_default_structured_logger_with_level
 
 
 @pytest.fixture(autouse=True)
-def reset_logging():
+def reset_logging() -> None:
     """Reset structlog and logging configuration before and after each test."""
     structlog.reset_defaults()
     structlog.contextvars.clear_contextvars()
@@ -38,7 +38,7 @@ def reset_logging():
     root.setLevel(logging.WARNING)
 
 
-def test_log_output_format(capsys):
+def test_log_output_format(capsys) -> None:
     """Verify JSON output has required fields and values."""
     set_default_structured_logger_with_level("gpu-health-monitor", "v1.0.0", "info")
 
@@ -55,7 +55,7 @@ def test_log_output_format(capsys):
     assert "level" in log_entry
 
 
-def test_log_level_filtering(capsys):
+def test_log_level_filtering(capsys) -> None:
     """Verify log level filtering works correctly."""
     set_default_structured_logger_with_level("test", "v1.0.0", "warning")
 
@@ -65,6 +65,7 @@ def test_log_level_filtering(capsys):
     logging.error("Error message")
 
     captured = capsys.readouterr()
+    assert captured.err.strip(), "No log output captured"
     lines = [line for line in captured.err.strip().split("\n") if line]
 
     # Only warning and error should be logged

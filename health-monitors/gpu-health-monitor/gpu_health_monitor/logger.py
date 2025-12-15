@@ -29,7 +29,7 @@ Usage:
 
 import logging
 import sys
-from typing import Final
+from typing import Any, Callable, Final
 
 import structlog
 
@@ -48,10 +48,16 @@ def _parse_log_level(level: str) -> int:
     return _LEVEL_MAP.get(level.lower().strip(), logging.INFO)
 
 
-def _make_module_version_injector(module: str, version: str):
+def _make_module_version_injector(
+    module: str, version: str
+) -> Callable[[logging.Logger | None, str, dict[str, Any]], dict[str, Any]]:
     """Create a processor that injects module and version into every log entry."""
 
-    def inject_module_version(logger, method_name, event_dict):
+    def inject_module_version(
+        logger: logging.Logger | None,
+        method_name: str,
+        event_dict: dict[str, Any],
+    ) -> dict[str, Any]:
         event_dict["module"] = module
         event_dict["version"] = version
         return event_dict
