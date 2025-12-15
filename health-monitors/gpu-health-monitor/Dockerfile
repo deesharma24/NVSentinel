@@ -13,11 +13,13 @@
 # limitations under the License.
 
 ARG DCGM_VERSION="4.2.0-1-ubuntu22.04"
-ARG VERSION="dev"
+ARG VERSION="0.1.0"
 ARG GIT_COMMIT="none"
 ARG BUILD_DATE=$(date -u +%FT%TZ)
 
 FROM public.ecr.aws/docker/library/python:3.10-bookworm AS build
+
+ARG VERSION
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install poetry==1.8.2
@@ -30,6 +32,8 @@ ENV POETRY_NO_INTERACTION=1 \
 WORKDIR /app
 
 COPY health-monitors/gpu-health-monitor/ .
+# Set package version from build arg (strip 'v' prefix for PEP 440 compliance)
+RUN poetry version $(echo "${VERSION}" | sed 's/^v//')
 RUN --mount=type=cache,target=/tmp/poetry_cache \
     poetry build --format wheel
 RUN poetry export --format requirements.txt --output constraints.txt --without-hashes

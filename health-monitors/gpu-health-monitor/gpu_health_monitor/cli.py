@@ -15,6 +15,7 @@
 import os
 import click, configparser, signal, sys
 import logging as log
+from importlib.metadata import version as get_package_version
 from threading import Event
 from prometheus_client import start_http_server
 import csv
@@ -98,8 +99,8 @@ def cli(
     dcgm_health_conditions_categorization_mapping_config = config["DCGMHealthConditionsCategorizationMapping"]
 
     # Initialize structured JSON logging
-    # Version should be injected at build time; "dev" is the default for local development
-    version = os.getenv("VERSION", "dev")
+    # Version is read from package metadata (set at build time via poetry version)
+    version = get_package_version("gpu-health-monitor")
     log_level = "debug" if verbose else os.getenv("LOG_LEVEL", "info")
     set_default_structured_logger_with_level("gpu-health-monitor", version, log_level)
 
