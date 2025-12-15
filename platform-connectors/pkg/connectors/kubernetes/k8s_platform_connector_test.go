@@ -26,9 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -38,6 +35,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 )
 
 var (
@@ -383,6 +383,7 @@ func TestParseMessages(t *testing.T) {
 		{"", []string{}},
 		{"message1;", []string{"message1"}},
 		{"message1;message2;", []string{"message1", "message2"}},
+		{"message1;message2;...", []string{"message1", "message2"}},
 	}
 
 	for i, test := range tests {
@@ -1388,8 +1389,6 @@ func TestUpdateNodeConditions_ErrorHandling(t *testing.T) {
 	}
 }
 func TestTruncateConditionMessage(t *testing.T) {
-	const truncationSuffix = "..."
-
 	// Generate test messages that would exceed 1KB when combined
 	generateLongMessages := func(count int) []string {
 		var msgs []string

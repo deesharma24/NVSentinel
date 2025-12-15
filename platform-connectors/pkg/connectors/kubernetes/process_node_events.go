@@ -26,18 +26,19 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
 const (
 	DefaultNamespace   = "default"
 	NoHealthFailureMsg = "No Health Failures"
+	truncationSuffix   = "..."
 )
 
 //nolint:cyclop, gocognit
@@ -185,7 +186,7 @@ func (r *K8sConnector) parseMessages(message string) []string {
 	if message != "" && message != NoHealthFailureMsg {
 		elementMessages := strings.Split(message, ";")
 		for _, msg := range elementMessages {
-			if msg != "" {
+			if msg != "" && msg != truncationSuffix {
 				messages = append(messages, msg)
 			}
 		}
@@ -552,7 +553,6 @@ func isKubernetesStringError(errStr string) bool {
 // truncateNodeConditionMessage builds the node condition message while respecting the max node condition
 // message length. It preserves complete error entries and adds a truncation indicator if needed.
 func (r *K8sConnector) truncateNodeConditionMessage(messages []string) string {
-	truncationSuffix := "..."
 	maxLen := int(r.maxNodeConditionMessageLength) - len(truncationSuffix)
 
 	var result strings.Builder
