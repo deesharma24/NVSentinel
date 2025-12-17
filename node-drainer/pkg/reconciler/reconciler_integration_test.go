@@ -476,6 +476,24 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 				// Should NOT contain "AwaitingPodCompletion" which is the AllowCompletion mode message
 				assert.NotContains(t, err.Error(), "AwaitingPodCompletion",
 					"AllowCompletion should NOT be processed when DeleteAfterTimeout has pods")
+
+				// Simulate DeleteAfterTimeout completion by deleting the timeout pod
+				t.Log("Simulating DeleteAfterTimeout completion - deleting timeout-pod")
+				err = client.CoreV1().Pods("timeout-test").Delete(ctx, "timeout-pod", metav1.DeleteOptions{
+					GracePeriodSeconds: ptr.To(int64(0)),
+				})
+				require.NoError(t, err)
+
+				// Wait for pod to be fully deleted
+				require.Eventually(t, func() bool {
+					_, err := client.CoreV1().Pods("timeout-test").Get(ctx, "timeout-pod", metav1.GetOptions{})
+					return errors.IsNotFound(err)
+				}, 10*time.Second, 500*time.Millisecond, "timeout-pod should be deleted")
+
+				// Verify completion-pod still exists (AllowCompletion mode doesn't delete, just waits)
+				completionPod, err := client.CoreV1().Pods("completion-test").Get(ctx, "completion-pod", metav1.GetOptions{})
+				require.NoError(t, err, "completion-pod should still exist")
+				assert.Nil(t, completionPod.DeletionTimestamp, "completion-pod should not be marked for deletion")
 			},
 		},
 	}
