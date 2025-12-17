@@ -134,11 +134,11 @@ func TestNodeDrainerEvictionModes(t *testing.T) {
 		// Adding 10s buffer to account for processing time
 		time.Sleep(70 * time.Second)
 
-		t.Log("Phase 3: DeleteAfterTimeout pods force-deleted after timeout")
+		t.Log("Phase 4: DeleteAfterTimeout pods force-deleted after timeout")
 		// This verifies that DeleteAfterTimeout is processed before AllowCompletion (not blocked by it)
 		helpers.WaitForPodsDeleted(ctx, t, client, "delete-timeout-test", deleteTimeoutPods)
 
-		t.Log("Phase 3: Verify AllowCompletion pods are still waiting (priority verification)")
+		t.Log("Phase 5: Verify AllowCompletion pods are still waiting (priority verification)")
 		// AllowCompletion pods should still exist - they wait indefinitely for natural completion
 		for _, podName := range allowCompletionPods {
 			pod := &v1.Pod{}
@@ -147,7 +147,7 @@ func TestNodeDrainerEvictionModes(t *testing.T) {
 			require.Nil(t, pod.DeletionTimestamp, "AllowCompletion pod %s should not be terminating", podName)
 		}
 
-		t.Log("Phase 4: Manually completing AllowCompletion pods to finish drain")
+		t.Log("Phase 6: Manually completing AllowCompletion pods to finish drain")
 		helpers.DeletePodsByNames(ctx, t, client, "allowcompletion-test", allowCompletionPods)
 		helpers.WaitForPodsDeleted(ctx, t, client, "allowcompletion-test", allowCompletionPods)
 

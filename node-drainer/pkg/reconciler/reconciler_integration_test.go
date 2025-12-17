@@ -448,54 +448,6 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 				}, 30*time.Second, 1*time.Second, "all pods should be evicted in single pass")
 			},
 		},
-		{
-			name:            "DeleteAfterTimeout processed before AllowCompletion when both have pods",
-			nodeName:        "mixed-mode-node",
-			namespaces:      []string{"timeout-test", "completion-test"},
-			nodeQuarantined: model.Quarantined,
-			pods: []*v1.Pod{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "timeout-pod", Namespace: "timeout-test"},
-					Spec:       v1.PodSpec{NodeName: "mixed-mode-node", Containers: []v1.Container{{Name: "c", Image: "nginx"}}},
-					Status:     v1.PodStatus{Phase: v1.PodRunning},
-				},
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "completion-pod", Namespace: "completion-test"},
-					Spec:       v1.PodSpec{NodeName: "mixed-mode-node", Containers: []v1.Container{{Name: "c", Image: "nginx"}}},
-					Status:     v1.PodStatus{Phase: v1.PodRunning},
-				},
-			},
-			expectError:       true,
-			expectedNodeLabel: ptr.To(string(statemanager.DrainingLabelValue)),
-			validateFunc: func(t *testing.T, client kubernetes.Interface, ctx context.Context, nodeName string, err error) {
-				// When both modes have pods, DeleteAfterTimeout should be processed first
-				// The error should indicate timeout eviction (waiting for timeout), NOT completion check
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "timeout eviction",
-					"DeleteAfterTimeout should be processed before AllowCompletion")
-				// Should NOT contain "AwaitingPodCompletion" which is the AllowCompletion mode message
-				assert.NotContains(t, err.Error(), "AwaitingPodCompletion",
-					"AllowCompletion should NOT be processed when DeleteAfterTimeout has pods")
-
-				// Simulate DeleteAfterTimeout completion by deleting the timeout pod
-				t.Log("Simulating DeleteAfterTimeout completion - deleting timeout-pod")
-				err = client.CoreV1().Pods("timeout-test").Delete(ctx, "timeout-pod", metav1.DeleteOptions{
-					GracePeriodSeconds: ptr.To(int64(0)),
-				})
-				require.NoError(t, err)
-
-				// Wait for pod to be fully deleted
-				require.Eventually(t, func() bool {
-					_, err := client.CoreV1().Pods("timeout-test").Get(ctx, "timeout-pod", metav1.GetOptions{})
-					return errors.IsNotFound(err)
-				}, 10*time.Second, 500*time.Millisecond, "timeout-pod should be deleted")
-
-				// Verify completion-pod still exists (AllowCompletion mode doesn't delete, just waits)
-				completionPod, err := client.CoreV1().Pods("completion-test").Get(ctx, "completion-pod", metav1.GetOptions{})
-				require.NoError(t, err, "completion-pod should still exist")
-				assert.Nil(t, completionPod.DeletionTimestamp, "completion-pod should not be marked for deletion")
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -713,6 +665,85 @@ func TestReconciler_MultipleNodesRequeue(t *testing.T) {
 
 	afterReceived := getCounterValue(t, metrics.TotalEventsReceived)
 	assert.GreaterOrEqual(t, afterReceived, beforeReceived+float64(len(nodeNames)), "Should receive events for all nodes")
+}
+
+// TestReconciler_DeleteAfterTimeoutThenAllowCompletion validates that AllowCompletion mode
+// is automatically processed after DeleteAfterTimeout pods are deleted.
+func TestReconciler_DeleteAfterTimeoutThenAllowCompletion(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+		{Name: "completion-*", Mode: config.ModeAllowCompletion},
+	})
+
+	nodeName := "mixed-mode-requeue-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+	createNamespace(setup.ctx, t, setup.client, "completion-test")
+
+	createPod(setup.ctx, t, setup.client, "timeout-test", "timeout-pod", nodeName, v1.PodRunning)
+	createPod(setup.ctx, t, setup.client, "completion-test", "completion-pod", nodeName, v1.PodRunning)
+
+	enqueueHealthEvent(setup.ctx, t, setup.queueMgr, setup.mockCollection, nodeName)
+
+	// Node should enter draining state
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
+
+	// Simulate DeleteAfterTimeout completion by deleting the timeout pod
+	t.Log("Simulating DeleteAfterTimeout completion - deleting timeout-pod")
+	err := setup.client.CoreV1().Pods("timeout-test").Delete(setup.ctx, "timeout-pod", metav1.DeleteOptions{
+		GracePeriodSeconds: ptr.To(int64(0)),
+	})
+	require.NoError(t, err)
+
+	// Wait for timeout-pod to be fully deleted
+	require.Eventually(t, func() bool {
+		_, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "timeout-pod", metav1.GetOptions{})
+		return errors.IsNotFound(err)
+	}, 10*time.Second, 500*time.Millisecond, "timeout-pod should be deleted")
+
+	// Verify completion-pod still exists (AllowCompletion mode waits, doesn't delete)
+	completionPod, err := setup.client.CoreV1().Pods("completion-test").Get(setup.ctx, "completion-pod", metav1.GetOptions{})
+	require.NoError(t, err, "completion-pod should still exist")
+	assert.Nil(t, completionPod.DeletionTimestamp, "completion-pod should not be marked for deletion")
+
+	// Verify AllowCompletion mode kicks in by checking for AwaitingPodCompletion event which will be created after
+	// DeleteAfterTimeout completes on the node by the reconciler.
+	t.Log("Verifying AllowCompletion mode is now processing.")
+	require.Eventually(t, func() bool {
+		nodeEvents, err := setup.client.CoreV1().Events(metav1.NamespaceDefault).List(setup.ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Node,reason=AwaitingPodCompletion", nodeName),
+		})
+		if err != nil {
+			return false
+		}
+		return len(nodeEvents.Items) > 0
+	}, 15*time.Second, 500*time.Millisecond, "AwaitingPodCompletion event should be created after DeleteAfterTimeout completes")
+
+	// Now simulate completion-pod finishing (AllowCompletion mode)
+	t.Log("Simulating completion-pod finishing")
+	completionPod.Status.Phase = v1.PodSucceeded
+	_, err = setup.client.CoreV1().Pods("completion-test").UpdateStatus(setup.ctx, completionPod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	// Clean up the completed pod
+	require.Eventually(t, func() bool {
+		pod, err := setup.client.CoreV1().Pods("completion-test").Get(setup.ctx, "completion-pod", metav1.GetOptions{})
+		if err != nil {
+			return true
+		}
+		if pod.Status.Phase == v1.PodSucceeded {
+			pod.Finalizers = nil
+			_, _ = setup.client.CoreV1().Pods("completion-test").Update(setup.ctx, pod, metav1.UpdateOptions{})
+			_ = setup.client.CoreV1().Pods("completion-test").Delete(setup.ctx, "completion-pod", metav1.DeleteOptions{
+				GracePeriodSeconds: ptr.To(int64(0)),
+			})
+		}
+		return false
+	}, 10*time.Second, 500*time.Millisecond)
+
+	// Node should transition to drain-succeeded after both modes complete
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainSucceededLabelValue)
 }
 
 type MockMongoCollection struct {
