@@ -22,11 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"tests/helpers"
+
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
-	"tests/helpers"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 )
@@ -165,6 +166,109 @@ func TestNodeDrainerEvictionModes(t *testing.T) {
 
 		helpers.DeletePodsByNames(ctx, t, client, "allowcompletion-test", podNames)
 		helpers.WaitForPodsDeleted(ctx, t, client, "allowcompletion-test", podNames)
+		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName, statemanager.NVSentinelStateLabelKey, helpers.DrainSucceededLabelValue)
+
+		return ctx
+	})
+
+	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		helpers.DeleteNamespace(ctx, t, client, "allowcompletion-test")
+		helpers.DeleteNamespace(ctx, t, client, "delete-timeout-test")
+
+		return helpers.TeardownNodeDrainer(ctx, t, c)
+	})
+
+	testEnv.Test(t, feature.Feature())
+}
+
+// TestNodeDrainerMixedEvictionPriority verifies that DeleteAfterTimeout pods are
+// force-deleted even when AllowCompletion pods exist on the same node.
+// This ensures that pods with deadlines (DeleteAfterTimeout) are processed first
+// and not blocked by pods waiting for natural completion (AllowCompletion).
+func TestNodeDrainerMixedEvictionPriority(t *testing.T) {
+	feature := features.New("TestNodeDrainerMixedEvictionPriority").
+		WithLabel("suite", "node-drainer").
+		WithLabel("type", "mixed-eviction")
+
+	var testCtx *helpers.NodeDrainerTestContext
+	var allowCompletionPods, deleteTimeoutPods []string
+
+	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		var newCtx context.Context
+		newCtx, testCtx = helpers.SetupNodeDrainerTest(ctx, t, c, "data/nd-all-modes.yaml", "immediate-test")
+
+		require.NoError(t, helpers.CreateNamespace(ctx, client, "allowcompletion-test"))
+		require.NoError(t, helpers.CreateNamespace(ctx, client, "delete-timeout-test"))
+
+		// Create pods in both namespaces on the same node
+		allowCompletionPods = helpers.CreatePodsFromTemplate(newCtx, t, client, "data/busybox-pods.yaml", testCtx.NodeName, "allowcompletion-test")
+		deleteTimeoutPods = helpers.CreatePodsFromTemplate(newCtx, t, client, "data/busybox-pods.yaml", testCtx.NodeName, "delete-timeout-test")
+
+		helpers.WaitForPodsRunning(newCtx, t, client, "allowcompletion-test", allowCompletionPods)
+		helpers.WaitForPodsRunning(newCtx, t, client, "delete-timeout-test", deleteTimeoutPods)
+
+		return newCtx
+	})
+
+	feature.Assess("DeleteAfterTimeout processed before AllowCompletion", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		t.Log("Step 1: Trigger health event to start node drain")
+		event := helpers.NewHealthEvent(testCtx.NodeName).
+			WithErrorCode("79").
+			WithMessage("GPU Fallen off the bus - Mixed eviction priority test")
+		helpers.SendHealthEvent(ctx, t, event)
+
+		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName, statemanager.NVSentinelStateLabelKey, helpers.DrainingLabelValue)
+
+		t.Log("Step 2: Verify both AllowCompletion and DeleteAfterTimeout pods are NOT immediately deleted")
+		// Both should wait initially (neither should be immediately deleted)
+		require.Never(t, func() bool {
+			for _, podName := range allowCompletionPods {
+				pod := &v1.Pod{}
+				if err := client.Resources().Get(ctx, podName, "allowcompletion-test", pod); err != nil {
+					return true
+				}
+			}
+			for _, podName := range deleteTimeoutPods {
+				pod := &v1.Pod{}
+				if err := client.Resources().Get(ctx, podName, "delete-timeout-test", pod); err != nil {
+					return true
+				}
+			}
+			return false
+		}, 15*time.Second, helpers.WaitInterval, "neither mode should delete pods immediately")
+
+		t.Log("Step 3: Wait for DeleteAfterTimeout to expire (~60s)")
+		// The deleteAfterTimeoutMinutes is set to 1 minute in nd-all-modes.yaml
+		// Adding 10s buffer to account for processing time
+		time.Sleep(70 * time.Second)
+
+		t.Log("Step 4: Verify DeleteAfterTimeout pods are force-deleted after timeout")
+		// DeleteAfterTimeout pods should be force-deleted EVEN THOUGH AllowCompletion pods still exist
+		helpers.WaitForPodsDeleted(ctx, t, client, "delete-timeout-test", deleteTimeoutPods)
+
+		t.Log("Step 5: Verify AllowCompletion pods are still waiting")
+		// AllowCompletion pods should still be running (not deleted)
+		for _, podName := range allowCompletionPods {
+			pod := &v1.Pod{}
+			err := client.Resources().Get(ctx, podName, "allowcompletion-test", pod)
+			require.NoError(t, err, "AllowCompletion pod %s should still exist", podName)
+			require.Nil(t, pod.DeletionTimestamp, "AllowCompletion pod %s should not be terminating", podName)
+		}
+
+		t.Log("Step 6: Manually complete AllowCompletion pods to finish drain")
+		helpers.DeletePodsByNames(ctx, t, client, "allowcompletion-test", allowCompletionPods)
+		helpers.WaitForPodsDeleted(ctx, t, client, "allowcompletion-test", allowCompletionPods)
+
+		t.Log("Step 7: Verify drain completes successfully")
 		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName, statemanager.NVSentinelStateLabelKey, helpers.DrainSucceededLabelValue)
 
 		return ctx

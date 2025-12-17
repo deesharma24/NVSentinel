@@ -448,6 +448,36 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 				}, 30*time.Second, 1*time.Second, "all pods should be evicted in single pass")
 			},
 		},
+		{
+			name:            "DeleteAfterTimeout processed before AllowCompletion when both have pods",
+			nodeName:        "mixed-mode-node",
+			namespaces:      []string{"timeout-test", "completion-test"},
+			nodeQuarantined: model.Quarantined,
+			pods: []*v1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "timeout-pod", Namespace: "timeout-test"},
+					Spec:       v1.PodSpec{NodeName: "mixed-mode-node", Containers: []v1.Container{{Name: "c", Image: "nginx"}}},
+					Status:     v1.PodStatus{Phase: v1.PodRunning},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "completion-pod", Namespace: "completion-test"},
+					Spec:       v1.PodSpec{NodeName: "mixed-mode-node", Containers: []v1.Container{{Name: "c", Image: "nginx"}}},
+					Status:     v1.PodStatus{Phase: v1.PodRunning},
+				},
+			},
+			expectError:       true,
+			expectedNodeLabel: ptr.To(string(statemanager.DrainingLabelValue)),
+			validateFunc: func(t *testing.T, client kubernetes.Interface, ctx context.Context, nodeName string, err error) {
+				// When both modes have pods, DeleteAfterTimeout should be processed first
+				// The error should indicate timeout eviction (waiting for timeout), NOT completion check
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "timeout eviction",
+					"DeleteAfterTimeout should be processed before AllowCompletion")
+				// Should NOT contain "AwaitingPodCompletion" which is the AllowCompletion mode message
+				assert.NotContains(t, err.Error(), "AwaitingPodCompletion",
+					"AllowCompletion should NOT be processed when DeleteAfterTimeout has pods")
+			},
+		},
 	}
 
 	for _, tt := range tests {
