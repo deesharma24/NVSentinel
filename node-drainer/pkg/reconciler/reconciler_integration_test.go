@@ -717,6 +717,7 @@ func TestReconciler_DeleteAfterTimeoutThenAllowCompletion(t *testing.T) {
 		if err != nil {
 			return false
 		}
+
 		return len(nodeEvents.Items) > 0
 	}, 15*time.Second, 500*time.Millisecond, "AwaitingPodCompletion event should be created after DeleteAfterTimeout completes")
 
