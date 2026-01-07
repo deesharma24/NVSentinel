@@ -314,41 +314,14 @@ func (r *K8sConnector) constructHealthEventMessage(healthEvent *protos.HealthEve
 	}
 
 	if healthEvent.Message != "" {
-		// Sanitize semicolons in the message to prevent delimiter collision
-		// The platform-connector uses ";" as a delimiter between health events
-		sanitizedMsg := sanitizeMessageSemicolons(healthEvent.Message)
-		message += fmt.Sprintf("%s ", sanitizedMsg)
+		// Replace semicolons with dots in the message to prevent delimiter collision
+		sanitizedMessage := strings.ReplaceAll(healthEvent.Message, ";", ".")
+		message += fmt.Sprintf("%s ", sanitizedMessage)
 	}
 
 	message += fmt.Sprintf("Recommended Action=%s;", healthEvent.RecommendedAction.String())
 
 	return message
-}
-
-// sanitizeMessageSemicolons removes semicolons to prevent delimiter collision.
-func sanitizeMessageSemicolons(msg string) string {
-	if !strings.Contains(msg, ";") {
-		return msg
-	}
-
-	var result strings.Builder
-	result.Grow(len(msg))
-
-	for i, c := range msg {
-		if c != ';' {
-			result.WriteRune(c)
-			continue
-		}
-		// Semicolon found: replace with dot only if no adjacent dot
-		prevDot := i > 0 && msg[i-1] == '.'
-		nextDot := i < len(msg)-1 && msg[i+1] == '.'
-
-		if !prevDot && !nextDot {
-			result.WriteByte('.')
-		}
-	}
-
-	return result.String()
 }
 
 func (r *K8sConnector) processHealthEvents(ctx context.Context, healthEvents *protos.HealthEvents) error {

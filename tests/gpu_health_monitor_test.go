@@ -482,8 +482,8 @@ func TestGpuNvlinkWatchSemicolonMessageParsing(t *testing.T) {
 			}
 
 			expectedSanitizedMessage := "" +
-				"Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink which exceeds threshold of 1 Monitor the NVLink. It can still perform workload. " +
-				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU. " +
+				"Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink which exceeds threshold of 1 Monitor the NVLink. It can still perform workload.. " +
+				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU.. " +
 				"Detected 1 nvlink_recovery_error_count_total NvLink errors on GPU 7's NVLink (should be 0). Run a field diagnostic on the GPU."
 			if !strings.Contains(condition.Message, expectedSanitizedMessage) {
 				t.Logf("Condition message did not contain the full expected NVLink error message: got: %q", condition.Message)
@@ -546,8 +546,8 @@ func TestGpuNvlinkWatchSemicolonMessageParsing(t *testing.T) {
 
 			// Validate the complete sanitized message for GPU 7 is still present
 			expectedGPU7Message := "" +
-				"Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink which exceeds threshold of 1 Monitor the NVLink. It can still perform workload. " +
-				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU. " +
+				"Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink which exceeds threshold of 1 Monitor the NVLink. It can still perform workload.. " +
+				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU.. " +
 				"Detected 1 nvlink_recovery_error_count_total NvLink errors on GPU 7's NVLink (should be 0). Run a field diagnostic on the GPU."
 			if !strings.Contains(condition.Message, expectedGPU7Message) {
 				t.Logf("Condition message did not contain the expected GPU 7 NVLink error message (may have been corrupted by semicolon parsing)")

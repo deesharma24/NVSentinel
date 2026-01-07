@@ -406,50 +406,6 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
-func TestSanitizeMessageSemicolons(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "message without semicolons unchanged",
-			input:    "Thermal watch error on GPU 0",
-			expected: "Thermal watch error on GPU 0",
-		},
-		{
-			name:     "semicolons replaced with dots",
-			input:    "XID error on GPU 0; XID error on GPU 1; XID error on GPU 2",
-			expected: "XID error on GPU 0. XID error on GPU 1. XID error on GPU 2",
-		},
-		{
-			name:     "semicolon after dot - no double dot",
-			input:    "Run a field diagnostic on the GPU.; Check NVLink status on GPU 1",
-			expected: "Run a field diagnostic on the GPU. Check NVLink status on GPU 1",
-		},
-		{
-			name: "GpuNvlinkWatch error from issue 656",
-			input: "Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink " +
-				"which exceeds threshold of 1 Monitor the NVLink. It can still perform workload.; " +
-				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) " +
-				"Run a field diagnostic on the GPU.; Detected 1 nvlink_recovery_error_count_total NvLink errors " +
-				"on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU.",
-			expected: "Detected 7 nvlink_flit_crc_error_count_total NvLink errors on GPU 7's NVLink " +
-				"which exceeds threshold of 1 Monitor the NVLink. It can still perform workload. " +
-				"Detected 97 nvlink_replay_error_count_total NvLink errors on GPU 7's NVLink (should be 0) " +
-				"Run a field diagnostic on the GPU. Detected 1 nvlink_recovery_error_count_total NvLink errors " +
-				"on GPU 7's NVLink (should be 0) Run a field diagnostic on the GPU.",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeMessageSemicolons(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestAddMessageIfNotExist(t *testing.T) {
 	tests := []struct {
 		messages []string
