@@ -31,6 +31,10 @@ type DatabaseConfig interface {
 	GetCollectionName() string
 	GetCertConfig() CertificateConfig
 	GetTimeoutConfig() TimeoutConfig
+	GetAppName() string
+	GetMaxPoolSize() uint64
+	GetMinPoolSize() uint64
+	GetMaxConnIdleTimeSeconds() int
 }
 
 // CertificateConfig holds TLS certificate configuration
@@ -69,6 +73,11 @@ const (
 	EnvChangeStreamRetryIntervalSeconds = "CHANGE_STREAM_RETRY_INTERVAL_SECONDS"
 	// Certificate rotation configuration
 	EnvMongoDBEnableCertRotation = "MONGODB_ENABLE_CERT_ROTATION"
+	// Connection pool configuration
+	EnvMongoDBAppName                = "MONGODB_APP_NAME"
+	EnvMongoDBMaxPoolSize            = "MONGODB_MAX_POOL_SIZE"
+	EnvMongoDBMinPoolSize            = "MONGODB_MIN_POOL_SIZE"
+	EnvMongoDBMaxConnIdleTimeSeconds = "MONGODB_MAX_CONN_IDLE_TIME_SECONDS"
 )
 
 // Default values that match existing module defaults for backward compatibility
@@ -81,6 +90,10 @@ const (
 	DefaultChangeStreamRetryInterval = 3   // 3 seconds
 	DefaultCertMountPath             = "/etc/ssl/mongo-client"
 	DefaultPostgreSQLCertMountPath   = "/etc/ssl/client-certs"
+	// Connection pool defaults
+	DefaultMaxPoolSize            = 3
+	DefaultMinPoolSize            = 1
+	DefaultMaxConnIdleTimeSeconds = 300 // 5 minutes
 )
 
 // GetCertMountPath returns the appropriate certificate mount path based on the provider.
@@ -108,11 +121,15 @@ func GetCertMountPath() string {
 
 // StandardDatabaseConfig implements DatabaseConfig for MongoDB with standard environment variables
 type StandardDatabaseConfig struct {
-	connectionURI  string
-	databaseName   string
-	collectionName string
-	certConfig     CertificateConfig
-	timeoutConfig  TimeoutConfig
+	connectionURI          string
+	databaseName           string
+	collectionName         string
+	certConfig             CertificateConfig
+	timeoutConfig          TimeoutConfig
+	appName                string
+	maxPoolSize            uint64
+	minPoolSize            uint64
+	maxConnIdleTimeSeconds int
 }
 
 // StandardCertificateConfig implements CertificateConfig
@@ -226,12 +243,34 @@ func NewDatabaseConfigWithCollection(
 		caCertPath: filepath.Join(certMountPath, "ca.crt"),
 	}
 
+	// Load connection pool settings
+	appName := os.Getenv(EnvMongoDBAppName)
+
+	maxPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxPoolSize, err)
+	}
+
+	minPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMinPoolSize, err)
+	}
+
+	maxConnIdleTimeSeconds, err := getPositiveIntEnvVar(EnvMongoDBMaxConnIdleTimeSeconds, DefaultMaxConnIdleTimeSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxConnIdleTimeSeconds, err)
+	}
+
 	return &StandardDatabaseConfig{
-		connectionURI:  connectionURI,
-		databaseName:   databaseName,
-		collectionName: collectionName,
-		certConfig:     certConfig,
-		timeoutConfig:  timeoutConfig,
+		connectionURI:          connectionURI,
+		databaseName:           databaseName,
+		collectionName:         collectionName,
+		certConfig:             certConfig,
+		timeoutConfig:          timeoutConfig,
+		appName:                appName,
+		maxPoolSize:            uint64(maxPoolSize),
+		minPoolSize:            uint64(minPoolSize),
+		maxConnIdleTimeSeconds: maxConnIdleTimeSeconds,
 	}, nil
 }
 
@@ -314,12 +353,34 @@ func newPostgreSQLCompatibleConfig(certMountPath, tableEnvVar, defaultTable stri
 		caCertPath: sslrootcert,
 	}
 
+	// Load connection pool settings (applicable for PostgreSQL too)
+	appName := os.Getenv(EnvMongoDBAppName)
+
+	maxPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxPoolSize, err)
+	}
+
+	minPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMinPoolSize, err)
+	}
+
+	maxConnIdleTimeSeconds, err := getPositiveIntEnvVar(EnvMongoDBMaxConnIdleTimeSeconds, DefaultMaxConnIdleTimeSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxConnIdleTimeSeconds, err)
+	}
+
 	return &StandardDatabaseConfig{
-		connectionURI:  connectionURI,
-		databaseName:   database,
-		collectionName: tableName,
-		certConfig:     certConfig,
-		timeoutConfig:  timeoutConfig,
+		connectionURI:          connectionURI,
+		databaseName:           database,
+		collectionName:         tableName,
+		certConfig:             certConfig,
+		timeoutConfig:          timeoutConfig,
+		appName:                appName,
+		maxPoolSize:            uint64(maxPoolSize),
+		minPoolSize:            uint64(minPoolSize),
+		maxConnIdleTimeSeconds: maxConnIdleTimeSeconds,
 	}, nil
 }
 
@@ -480,6 +541,31 @@ func (c *StandardDatabaseConfig) GetCertConfig() CertificateConfig {
 
 func (c *StandardDatabaseConfig) GetTimeoutConfig() TimeoutConfig {
 	return c.timeoutConfig
+}
+
+func (c *StandardDatabaseConfig) GetAppName() string {
+	return c.appName
+}
+
+func (c *StandardDatabaseConfig) GetMaxPoolSize() uint64 {
+	if c.maxPoolSize == 0 {
+		return uint64(DefaultMaxPoolSize)
+	}
+	return c.maxPoolSize
+}
+
+func (c *StandardDatabaseConfig) GetMinPoolSize() uint64 {
+	if c.minPoolSize == 0 {
+		return uint64(DefaultMinPoolSize)
+	}
+	return c.minPoolSize
+}
+
+func (c *StandardDatabaseConfig) GetMaxConnIdleTimeSeconds() int {
+	if c.maxConnIdleTimeSeconds == 0 {
+		return DefaultMaxConnIdleTimeSeconds
+	}
+	return c.maxConnIdleTimeSeconds
 }
 
 func (c *StandardCertificateConfig) GetCertPath() string {

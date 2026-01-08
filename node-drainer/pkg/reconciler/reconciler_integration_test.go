@@ -135,6 +135,22 @@ func (m *mockDatabaseConfig) GetTimeoutConfig() sdkconfig.TimeoutConfig {
 	return &mockTimeoutConfig{}
 }
 
+func (m *mockDatabaseConfig) GetAppName() string {
+	return "node-drainer"
+}
+
+func (m *mockDatabaseConfig) GetMaxPoolSize() uint64 {
+	return 3
+}
+
+func (m *mockDatabaseConfig) GetMinPoolSize() uint64 {
+	return 1
+}
+
+func (m *mockDatabaseConfig) GetMaxConnIdleTimeSeconds() int {
+	return 300
+}
+
 // mockCertConfig is a simple mock implementation for testing
 type mockCertConfig struct{}
 

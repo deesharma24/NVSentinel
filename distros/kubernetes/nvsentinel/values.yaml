@@ -39,6 +39,12 @@ global:
   # provide updated certificates to new MongoDB connections.
   certificateRotationEnabled: false
 
+  # MongoDB connection pool settings
+  mongodb:
+    maxPoolSize: 3
+    minPoolSize: 1
+    maxConnIdleTimeSeconds: 300
+
   # Shared metadata path used by metadata-collector and syslog-health-monitor
   metadataPath: /var/lib/nvsentinel/gpu_metadata.json
 

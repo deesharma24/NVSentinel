@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
 
@@ -85,6 +86,25 @@ func (f *ClientFactory) CreateDatabaseClient(ctx context.Context) (client.Databa
 				err,
 			)
 		}
+
+		// Apply connection pool settings to prevent idle connection accumulation
+		maxPoolSize := f.dbConfig.GetMaxPoolSize()
+		if maxPoolSize == 0 {
+			maxPoolSize = 3 // Default
+		}
+		minPoolSize := f.dbConfig.GetMinPoolSize()
+		if minPoolSize == 0 {
+			minPoolSize = 1 // Default
+		}
+		maxConnIdleTime := time.Duration(f.dbConfig.GetMaxConnIdleTimeSeconds()) * time.Second
+		if maxConnIdleTime == 0 {
+			maxConnIdleTime = 5 * time.Minute // Default
+		}
+
+		db.SetMaxOpenConns(int(maxPoolSize))
+		db.SetMaxIdleConns(int(minPoolSize))
+		db.SetConnMaxIdleTime(maxConnIdleTime)
+		db.SetConnMaxLifetime(time.Hour) // Max lifetime of a connection
 
 		// Test the connection
 		if err := db.PingContext(ctx); err != nil {

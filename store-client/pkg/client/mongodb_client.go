@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"go.mongodb.org/mongo-driver/bson"
@@ -343,6 +344,11 @@ func NewMongoDBClient(ctx context.Context, dbConfig config.DatabaseConfig) (*Mon
 		TotalCACertIntervalSeconds:       dbConfig.GetTimeoutConfig().GetCACertIntervalSeconds(),
 		ChangeStreamRetryDeadlineSeconds: dbConfig.GetTimeoutConfig().GetChangeStreamRetryDeadlineSeconds(),
 		ChangeStreamRetryIntervalSeconds: dbConfig.GetTimeoutConfig().GetChangeStreamRetryIntervalSeconds(),
+		// Connection pool settings to prevent idle connection accumulation
+		AppName:         dbConfig.GetAppName(),
+		MaxPoolSize:     dbConfig.GetMaxPoolSize(),
+		MinPoolSize:     dbConfig.GetMinPoolSize(),
+		MaxConnIdleTime: time.Duration(dbConfig.GetMaxConnIdleTimeSeconds()) * time.Second,
 	}
 
 	// Initialize certificate watcher if rotation is enabled

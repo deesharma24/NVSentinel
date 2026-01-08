@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,10 +69,35 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 		return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
 	}
 
-	// Set connection pool settings
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(time.Hour)
+	// Set connection pool settings to prevent idle connection accumulation
+	// Use conservative defaults similar to MongoDB settings
+	maxOpenConns := 3                  // Default: limit connections per client
+	maxIdleConns := 1                  // Default: keep at least 1 warm connection
+	maxConnIdleTime := 5 * time.Minute // Default: close idle connections after 5 minutes
+
+	// These can be overridden via config.Options if needed (values are strings)
+	if config.Options != nil {
+		if v, ok := config.Options["maxOpenConns"]; ok {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				maxOpenConns = parsed
+			}
+		}
+		if v, ok := config.Options["maxIdleConns"]; ok {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				maxIdleConns = parsed
+			}
+		}
+		if v, ok := config.Options["maxConnIdleTimeSeconds"]; ok {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				maxConnIdleTime = time.Duration(parsed) * time.Second
+			}
+		}
+	}
+
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxIdleTime(maxConnIdleTime)
+	db.SetConnMaxLifetime(time.Hour) // Max lifetime of a connection
 
 	// Create tables if they don't exist
 	if err := createTables(ctx, db); err != nil {

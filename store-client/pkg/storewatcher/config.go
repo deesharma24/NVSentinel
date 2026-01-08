@@ -43,6 +43,11 @@ type MongoDBConfig struct {
 	ChangeStreamRetryIntervalSeconds int `env:"MONGODB_CHANGE_STREAM_RETRY_INTERVAL_SECONDS" envDefault:"5"`   //nolint:lll
 
 	UnprocessedEventsMetricUpdateIntervalSeconds int `env:"UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS" envDefault:"25"` //nolint:lll
+
+	AppName                string `env:"MONGODB_APP_NAME" envDefault:""`
+	MaxPoolSize            uint64 `env:"MONGODB_MAX_POOL_SIZE" envDefault:"3"`
+	MinPoolSize            uint64 `env:"MONGODB_MIN_POOL_SIZE" envDefault:"1"`
+	MaxConnIdleTimeSeconds int    `env:"MONGODB_MAX_CONN_IDLE_TIME_SECONDS" envDefault:"300"`
 }
 
 // TokenConfig holds the token-specific configuration.

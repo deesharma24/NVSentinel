@@ -78,6 +78,13 @@ data:
   MONGODB_ENABLE_CERT_ROTATION: {{ .Values.global.certificateRotationEnabled | default false | quote }}
   {{- end }}
 
+  # MongoDB connection pool settings to prevent idle connection accumulation
+  {{- if or (eq .Values.global.datastore.provider "mongodb") (not .Values.global.datastore.provider) }}
+  MONGODB_MAX_POOL_SIZE: {{ .Values.global.mongodb.maxPoolSize | default 3 | quote }}
+  MONGODB_MIN_POOL_SIZE: {{ .Values.global.mongodb.minPoolSize | default 1 | quote }}
+  MONGODB_MAX_CONN_IDLE_TIME_SECONDS: {{ .Values.global.mongodb.maxConnIdleTimeSeconds | default 300 | quote }}
+  {{- end }}
+
   # Legacy MongoDB environment variables for backward compatibility
   # These are set for all providers to support legacy code paths that still use the old config system
   {{- if eq .Values.global.datastore.provider "mongodb" }}

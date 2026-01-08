@@ -158,6 +158,22 @@ func (l *LegacyDatabaseConfigAdapter) GetTimeoutConfig() config.TimeoutConfig {
 	return &LegacyTimeoutConfigAdapter{}
 }
 
+func (l *LegacyDatabaseConfigAdapter) GetAppName() string {
+	return ""
+}
+
+func (l *LegacyDatabaseConfigAdapter) GetMaxPoolSize() uint64 {
+	return 3
+}
+
+func (l *LegacyDatabaseConfigAdapter) GetMinPoolSize() uint64 {
+	return 1
+}
+
+func (l *LegacyDatabaseConfigAdapter) GetMaxConnIdleTimeSeconds() int {
+	return 300
+}
+
 // LegacyCertConfigAdapter adapts DataStoreConfig certificate configuration
 type LegacyCertConfigAdapter struct {
 	dsConfig      *datastore.DataStoreConfig

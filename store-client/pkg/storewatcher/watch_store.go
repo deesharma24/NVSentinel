@@ -73,15 +73,25 @@ func NewChangeStreamWatcher(
 		return nil, fmt.Errorf("error connecting to mongoDB: %w", err)
 	}
 
+	// Helper to disconnect client on error - prevents connection leaks during initialization
+	disconnectOnError := func() {
+		if disconnectErr := client.Disconnect(ctx); disconnectErr != nil {
+			slog.Warn("Failed to disconnect client during cleanup", "error", disconnectErr)
+		}
+	}
+
 	if mongoConfig.TotalPingTimeoutSeconds <= 0 {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping timeout value, value must be a positive integer")
 	}
 
 	if mongoConfig.TotalPingIntervalSeconds <= 0 {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping interval value, value must be a positive integer")
 	}
 
 	if mongoConfig.TotalPingIntervalSeconds >= mongoConfig.TotalPingTimeoutSeconds {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping interval value, value must be less than ping timeout")
 	}
 
@@ -92,6 +102,7 @@ func NewChangeStreamWatcher(
 	err = confirmConnectivityWithDBAndCollection(ctx, client, mongoConfig.Database,
 		mongoConfig.Collection, totalTimeout, interval)
 	if err != nil {
+		disconnectOnError()
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 
@@ -101,6 +112,7 @@ func NewChangeStreamWatcher(
 	err = confirmConnectivityWithDBAndCollection(ctx, client, tokenConfig.TokenDatabase,
 		tokenConfig.TokenCollection, totalTimeout, interval)
 	if err != nil {
+		disconnectOnError()
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 
@@ -134,6 +146,7 @@ func NewChangeStreamWatcher(
 		}
 	} else if !errors.Is(err, mongo.ErrNoDocuments) {
 		// if no document was found, it is a normal case if it's the first time the client is connecting
+		disconnectOnError()
 		return nil, fmt.Errorf("error retrieving resume token from DB %s and collection %s: %w",
 			tokenConfig.TokenDatabase, tokenConfig.TokenCollection, err)
 	}
@@ -141,6 +154,7 @@ func NewChangeStreamWatcher(
 	// Open the change stream with appropriate read preference based on resume token presence
 	cs, err := openChangeStream(ctx, client, mongoConfig, pipeline, opts, hasResumeToken)
 	if err != nil {
+		disconnectOnError()
 		return nil, fmt.Errorf("failed to open change stream: %w", err)
 	}
 
@@ -365,6 +379,21 @@ func (w *ChangeStreamWatcher) Close(ctx context.Context) error {
 		slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 	})
 
+	// Disconnect the MongoDB client to release connections
+	if w.client != nil {
+		if disconnectErr := w.client.Disconnect(ctx); disconnectErr != nil {
+			slog.Warn("Failed to disconnect MongoDB client",
+				"client", w.clientName,
+				"error", disconnectErr)
+			// Don't override the original error if changeStream.Close() failed
+			if err == nil {
+				err = fmt.Errorf("failed to disconnect MongoDB client for %s: %w", w.clientName, disconnectErr)
+			}
+		} else {
+			slog.Info("Successfully disconnected MongoDB client", "client", w.clientName)
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to close change stream for client %s: %w", w.clientName, err)
 	}
@@ -429,15 +458,25 @@ func GetCollectionClient(
 		return nil, fmt.Errorf("error connecting to mongoDB: %w", err)
 	}
 
+	// Helper to disconnect client on error - prevents connection leaks during initialization
+	disconnectOnError := func() {
+		if disconnectErr := client.Disconnect(ctx); disconnectErr != nil {
+			slog.Warn("Failed to disconnect client during cleanup", "error", disconnectErr)
+		}
+	}
+
 	if mongoConfig.TotalPingTimeoutSeconds <= 0 {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping timeout value, value must be a positive integer")
 	}
 
 	if mongoConfig.TotalPingIntervalSeconds <= 0 {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping interval value, value must be a positive integer")
 	}
 
 	if mongoConfig.TotalPingIntervalSeconds >= mongoConfig.TotalPingTimeoutSeconds {
+		disconnectOnError()
 		return nil, fmt.Errorf("invalid ping interval value, value must be less than ping timeout")
 	}
 
@@ -448,6 +487,7 @@ func GetCollectionClient(
 	err = confirmConnectivityWithDBAndCollection(ctx, client, mongoConfig.Database,
 		mongoConfig.Collection, totalTimeout, interval)
 	if err != nil {
+		disconnectOnError()
 		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 
@@ -508,7 +548,38 @@ func constructMongoClientOptions(
 		AuthSource:    "$external",
 	}
 
-	return options.Client().ApplyURI(mongoConfig.URI).SetTLSConfig(tlsConfig).SetAuth(credential), nil
+	// Apply connection pool settings to prevent idle connection accumulation
+	// These are critical for large clusters with many clients (e.g., 1000+ platform-connectors)
+	maxPoolSize := mongoConfig.MaxPoolSize
+	if maxPoolSize == 0 {
+		maxPoolSize = 3 // Default max pool size
+	}
+
+	minPoolSize := mongoConfig.MinPoolSize
+	if minPoolSize == 0 {
+		minPoolSize = 1 // Default min pool size
+	}
+
+	maxConnIdleTime := time.Duration(mongoConfig.MaxConnIdleTimeSeconds) * time.Second
+	if maxConnIdleTime == 0 {
+		maxConnIdleTime = 5 * time.Minute // Default: 5 minutes
+	}
+
+	clientOpts := options.Client().
+		ApplyURI(mongoConfig.URI).
+		SetTLSConfig(tlsConfig).
+		SetAuth(credential).
+		SetMaxPoolSize(maxPoolSize).
+		SetMinPoolSize(minPoolSize).
+		SetMaxConnIdleTime(maxConnIdleTime)
+
+	// Set AppName if provided - this helps identify connections in MongoDB logs and currentOp
+	if mongoConfig.AppName != "" {
+		clientOpts.SetAppName(mongoConfig.AppName)
+		slog.Info("MongoDB client configured with app name", "appName", mongoConfig.AppName)
+	}
+
+	return clientOpts, nil
 }
 
 func ConstructClientTLSConfig(

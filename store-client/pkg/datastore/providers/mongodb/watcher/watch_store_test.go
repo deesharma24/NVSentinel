@@ -1841,3 +1841,33 @@ func TestChangeStreamWatcher_SendOnClosedChannelPrevention(t *testing.T) {
 		// If there's a race condition, the race detector will catch it
 	})
 }
+
+// TestChangeStreamWatcher_CloseHandlesNilClient verifies that Close() handles
+// nil client gracefully (edge case).
+func TestChangeStreamWatcher_CloseHandlesNilClient(t *testing.T) {
+	mtOpts := mtest.NewOptions().ClientType(mtest.Mock).DatabaseName("testdb")
+	mt := mtest.New(t, mtOpts)
+
+	mt.Run("Close handles nil client gracefully", func(mt *mtest.T) {
+		mt.AddMockResponses(
+			mtest.CreateCursorResponse(1, "testdb.testcollection", mtest.FirstBatch),
+			mtest.CreateCursorResponse(0, "testdb.testcollection", mtest.NextBatch),
+		)
+
+		coll := mt.Client.Database("testdb").Collection("testcollection")
+		changeStream, err := coll.Watch(context.Background(), mongo.Pipeline{})
+		require.NoError(mt, err)
+
+		watcher := &ChangeStreamWatcher{
+			client:         nil, // Explicitly nil - edge case
+			changeStream:   changeStream,
+			eventChannel:   make(chan Event, 10),
+			resumeTokenCol: mt.Client.Database("tokendb").Collection("tokencollection"),
+			clientName:     "testclient",
+			done:           make(chan struct{}),
+		}
+
+		// Close should not panic with nil client
+		_ = watcher.Close(context.Background())
+	})
+}
