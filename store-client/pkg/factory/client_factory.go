@@ -89,20 +89,11 @@ func (f *ClientFactory) CreateDatabaseClient(ctx context.Context) (client.Databa
 
 		// Apply connection pool settings to prevent idle connection accumulation
 		maxPoolSize := f.dbConfig.GetMaxPoolSize()
-		if maxPoolSize == 0 {
-			maxPoolSize = 3 // Default
-		}
 		minPoolSize := f.dbConfig.GetMinPoolSize()
-		if minPoolSize == 0 {
-			minPoolSize = 1 // Default
-		}
 		maxConnIdleTime := time.Duration(f.dbConfig.GetMaxConnIdleTimeSeconds()) * time.Second
-		if maxConnIdleTime == 0 {
-			maxConnIdleTime = 5 * time.Minute // Default
-		}
 
-		db.SetMaxOpenConns(int(maxPoolSize))
-		db.SetMaxIdleConns(int(minPoolSize))
+		db.SetMaxOpenConns(poolSizeToInt(maxPoolSize))
+		db.SetMaxIdleConns(poolSizeToInt(minPoolSize))
 		db.SetConnMaxIdleTime(maxConnIdleTime)
 		db.SetConnMaxLifetime(time.Hour) // Max lifetime of a connection
 
@@ -231,4 +222,14 @@ func convertToMongoPipeline(pipeline interface{}) (interface{}, error) {
 		// Assume it's already a MongoDB pipeline (backward compatibility)
 		return pipeline, nil
 	}
+}
+
+// poolSizeToInt converts uint64 pool size to int for sql.DB methods.
+func poolSizeToInt(size uint64) int {
+	const maxSafePoolSize = 1000
+	if size > maxSafePoolSize {
+		return maxSafePoolSize
+	}
+
+	return int(size)
 }

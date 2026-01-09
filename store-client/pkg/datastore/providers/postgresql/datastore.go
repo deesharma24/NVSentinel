@@ -37,23 +37,64 @@ type PostgreSQLDataStore struct {
 	healthEventStore      datastore.HealthEventStore
 }
 
+// validatePostgreSQLConfig validates the required configuration fields
+func validatePostgreSQLConfig(conn datastore.ConnectionConfig) error {
+	if conn.Host == "" {
+		return fmt.Errorf("host is required")
+	}
+
+	if conn.Database == "" {
+		return fmt.Errorf("database is required")
+	}
+
+	if conn.Username == "" {
+		return fmt.Errorf("username is required")
+	}
+
+	if conn.Port < 1 || conn.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+
+	return nil
+}
+
+// getPoolOption parses an integer option from the options map
+func getPoolOption(options map[string]string, key string, defaultVal int) int {
+	if options == nil {
+		return defaultVal
+	}
+
+	if v, ok := options[key]; ok {
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			slog.Warn("Invalid pool option value, using default",
+				"key", key,
+				"value", v,
+				"error", err,
+				"default", defaultVal)
+
+			return defaultVal
+		}
+
+		if parsed <= 0 {
+			slog.Warn("Pool option must be positive, using default",
+				"key", key,
+				"value", parsed,
+				"default", defaultVal)
+
+			return defaultVal
+		}
+
+		return parsed
+	}
+
+	return defaultVal
+}
+
 // NewPostgreSQLStore creates a new PostgreSQL datastore
 func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (datastore.DataStore, error) {
-	// Validate configuration
-	if config.Connection.Host == "" {
-		return nil, fmt.Errorf("host is required")
-	}
-
-	if config.Connection.Database == "" {
-		return nil, fmt.Errorf("database is required")
-	}
-
-	if config.Connection.Username == "" {
-		return nil, fmt.Errorf("username is required")
-	}
-
-	if config.Connection.Port < 1 || config.Connection.Port > 65535 {
-		return nil, fmt.Errorf("port must be between 1 and 65535")
+	if err := validatePostgreSQLConfig(config.Connection); err != nil {
+		return nil, err
 	}
 
 	connectionString := buildConnectionString(config.Connection)
@@ -66,38 +107,19 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 	// Test connection
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
+
 		return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
 	}
 
-	// Set connection pool settings to prevent idle connection accumulation
-	// Use conservative defaults similar to MongoDB settings
-	maxOpenConns := 3                  // Default: limit connections per client
-	maxIdleConns := 1                  // Default: keep at least 1 warm connection
-	maxConnIdleTime := 5 * time.Minute // Default: close idle connections after 5 minutes
-
-	// These can be overridden via config.Options if needed (values are strings)
-	if config.Options != nil {
-		if v, ok := config.Options["maxOpenConns"]; ok {
-			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-				maxOpenConns = parsed
-			}
-		}
-		if v, ok := config.Options["maxIdleConns"]; ok {
-			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-				maxIdleConns = parsed
-			}
-		}
-		if v, ok := config.Options["maxConnIdleTimeSeconds"]; ok {
-			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-				maxConnIdleTime = time.Duration(parsed) * time.Second
-			}
-		}
-	}
+	// Set connection pool settings (defaults similar to MongoDB settings)
+	maxOpenConns := getPoolOption(config.Options, "maxOpenConns", 3)
+	maxIdleConns := getPoolOption(config.Options, "maxIdleConns", 1)
+	maxConnIdleTimeSec := getPoolOption(config.Options, "maxConnIdleTimeSeconds", 300)
 
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxIdleTime(maxConnIdleTime)
-	db.SetConnMaxLifetime(time.Hour) // Max lifetime of a connection
+	db.SetConnMaxIdleTime(time.Duration(maxConnIdleTimeSec) * time.Second)
+	db.SetConnMaxLifetime(time.Hour)
 
 	// Create tables if they don't exist
 	if err := createTables(ctx, db); err != nil {

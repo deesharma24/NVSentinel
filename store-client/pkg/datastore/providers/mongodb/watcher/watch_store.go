@@ -198,6 +198,7 @@ func NewChangeStreamWatcher(
 	} else if !errors.Is(err, mongo.ErrNoDocuments) {
 		// if no document was found, it is a normal case if it's the first time the client is connecting
 		disconnectOnError()
+
 		return nil, fmt.Errorf("error retrieving resume token from DB %s and collection %s: %w",
 			tokenConfig.TokenDatabase, tokenConfig.TokenCollection, err)
 	}

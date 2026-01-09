@@ -193,6 +193,34 @@ func NewDatabaseConfigForCollectionType(certMountPath, collectionType string) (D
 	return NewDatabaseConfigWithCollection(certMountPath, envVar, defaultCollection)
 }
 
+// getRequiredEnv returns the value of an environment variable or an error if not set
+func getRequiredEnv(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return "", fmt.Errorf("required environment variable %s is not set", name)
+	}
+
+	return value, nil
+}
+
+// getCollectionName resolves the collection name from env var or default
+func getCollectionName(collectionEnvVar, defaultCollection string) (string, error) {
+	envName := EnvMongoDBCollectionName
+	if collectionEnvVar != "" {
+		envName = collectionEnvVar
+	}
+
+	if name := os.Getenv(envName); name != "" {
+		return name, nil
+	}
+
+	if defaultCollection != "" {
+		return defaultCollection, nil
+	}
+
+	return "", fmt.Errorf("required environment variable %s is not set", envName)
+}
+
 // NewDatabaseConfigWithCollection allows custom certificate mount path and collection configuration
 // If collectionEnvVar is provided, it will be used instead of the default MONGODB_COLLECTION_NAME
 // If defaultCollection is provided, it will be used as fallback if the environment variable is not set
@@ -205,29 +233,19 @@ func NewDatabaseConfigWithCollection(
 	}
 
 	// Load required MongoDB environment variables
-	connectionURI := os.Getenv(EnvMongoDBURI)
-	if connectionURI == "" {
-		return nil, fmt.Errorf("required environment variable %s is not set", EnvMongoDBURI)
+	connectionURI, err := getRequiredEnv(EnvMongoDBURI)
+	if err != nil {
+		return nil, err
 	}
 
-	databaseName := os.Getenv(EnvMongoDBDatabaseName)
-	if databaseName == "" {
-		return nil, fmt.Errorf("required environment variable %s is not set", EnvMongoDBDatabaseName)
+	databaseName, err := getRequiredEnv(EnvMongoDBDatabaseName)
+	if err != nil {
+		return nil, err
 	}
 
-	// Determine which collection environment variable to use
-	collectionEnvName := EnvMongoDBCollectionName
-	if collectionEnvVar != "" {
-		collectionEnvName = collectionEnvVar
-	}
-
-	collectionName := os.Getenv(collectionEnvName)
-	if collectionName == "" {
-		if defaultCollection != "" {
-			collectionName = defaultCollection
-		} else {
-			return nil, fmt.Errorf("required environment variable %s is not set", collectionEnvName)
-		}
+	collectionName, err := getCollectionName(collectionEnvVar, defaultCollection)
+	if err != nil {
+		return nil, err
 	}
 
 	// Load timeout configuration with defaults
@@ -246,12 +264,12 @@ func NewDatabaseConfigWithCollection(
 	// Load connection pool settings
 	appName := os.Getenv(EnvMongoDBAppName)
 
-	maxPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
+	maxPoolSize, err := getPositiveUint64EnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxPoolSize, err)
 	}
 
-	minPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
+	minPoolSize, err := getPositiveUint64EnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMinPoolSize, err)
 	}
@@ -268,8 +286,8 @@ func NewDatabaseConfigWithCollection(
 		certConfig:             certConfig,
 		timeoutConfig:          timeoutConfig,
 		appName:                appName,
-		maxPoolSize:            uint64(maxPoolSize),
-		minPoolSize:            uint64(minPoolSize),
+		maxPoolSize:            maxPoolSize,
+		minPoolSize:            minPoolSize,
 		maxConnIdleTimeSeconds: maxConnIdleTimeSeconds,
 	}, nil
 }
@@ -356,12 +374,12 @@ func newPostgreSQLCompatibleConfig(certMountPath, tableEnvVar, defaultTable stri
 	// Load connection pool settings (applicable for PostgreSQL too)
 	appName := os.Getenv(EnvMongoDBAppName)
 
-	maxPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
+	maxPoolSize, err := getPositiveUint64EnvVar(EnvMongoDBMaxPoolSize, DefaultMaxPoolSize)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMaxPoolSize, err)
 	}
 
-	minPoolSize, err := getPositiveIntEnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
+	minPoolSize, err := getPositiveUint64EnvVar(EnvMongoDBMinPoolSize, DefaultMinPoolSize)
 	if err != nil {
 		return nil, fmt.Errorf("invalid %s: %w", EnvMongoDBMinPoolSize, err)
 	}
@@ -378,8 +396,8 @@ func newPostgreSQLCompatibleConfig(certMountPath, tableEnvVar, defaultTable stri
 		certConfig:             certConfig,
 		timeoutConfig:          timeoutConfig,
 		appName:                appName,
-		maxPoolSize:            uint64(maxPoolSize),
-		minPoolSize:            uint64(minPoolSize),
+		maxPoolSize:            maxPoolSize,
+		minPoolSize:            minPoolSize,
 		maxConnIdleTimeSeconds: maxConnIdleTimeSeconds,
 	}, nil
 }
@@ -452,6 +470,26 @@ func getPositiveIntEnvVar(name string, defaultValue int) (int, error) {
 	}
 
 	if value <= 0 {
+		return 0, fmt.Errorf("value of %s must be a positive integer, got %d", name, value)
+	}
+
+	return value, nil
+}
+
+// getPositiveUint64EnvVar reads a uint64 environment variable with a default value
+// Used for pool sizes which are stored as uint64 for MongoDB compatibility
+func getPositiveUint64EnvVar(name string, defaultValue uint64) (uint64, error) {
+	valueStr := os.Getenv(name)
+	if valueStr == "" {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.ParseUint(valueStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("error converting %s to uint64: %w", name, err)
+	}
+
+	if value == 0 {
 		return 0, fmt.Errorf("value of %s must be a positive integer, got %d", name, value)
 	}
 
@@ -551,6 +589,7 @@ func (c *StandardDatabaseConfig) GetMaxPoolSize() uint64 {
 	if c.maxPoolSize == 0 {
 		return uint64(DefaultMaxPoolSize)
 	}
+
 	return c.maxPoolSize
 }
 
@@ -558,6 +597,7 @@ func (c *StandardDatabaseConfig) GetMinPoolSize() uint64 {
 	if c.minPoolSize == 0 {
 		return uint64(DefaultMinPoolSize)
 	}
+
 	return c.minPoolSize
 }
 
@@ -565,6 +605,7 @@ func (c *StandardDatabaseConfig) GetMaxConnIdleTimeSeconds() int {
 	if c.maxConnIdleTimeSeconds == 0 {
 		return DefaultMaxConnIdleTimeSeconds
 	}
+
 	return c.maxConnIdleTimeSeconds
 }
 

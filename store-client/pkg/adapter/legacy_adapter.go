@@ -163,15 +163,15 @@ func (l *LegacyDatabaseConfigAdapter) GetAppName() string {
 }
 
 func (l *LegacyDatabaseConfigAdapter) GetMaxPoolSize() uint64 {
-	return 3
+	return config.DefaultMaxPoolSize
 }
 
 func (l *LegacyDatabaseConfigAdapter) GetMinPoolSize() uint64 {
-	return 1
+	return config.DefaultMinPoolSize
 }
 
 func (l *LegacyDatabaseConfigAdapter) GetMaxConnIdleTimeSeconds() int {
-	return 300
+	return config.DefaultMaxConnIdleTimeSeconds
 }
 
 // LegacyCertConfigAdapter adapts DataStoreConfig certificate configuration

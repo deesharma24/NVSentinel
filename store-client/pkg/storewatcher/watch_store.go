@@ -147,6 +147,7 @@ func NewChangeStreamWatcher(
 	} else if !errors.Is(err, mongo.ErrNoDocuments) {
 		// if no document was found, it is a normal case if it's the first time the client is connecting
 		disconnectOnError()
+
 		return nil, fmt.Errorf("error retrieving resume token from DB %s and collection %s: %w",
 			tokenConfig.TokenDatabase, tokenConfig.TokenCollection, err)
 	}
@@ -549,21 +550,10 @@ func constructMongoClientOptions(
 	}
 
 	// Apply connection pool settings to prevent idle connection accumulation
-	// These are critical for large clusters with many clients (e.g., 1000+ platform-connectors)
+	// Defaults are set via envDefault tags in MongoDBConfig struct
 	maxPoolSize := mongoConfig.MaxPoolSize
-	if maxPoolSize == 0 {
-		maxPoolSize = 3 // Default max pool size
-	}
-
 	minPoolSize := mongoConfig.MinPoolSize
-	if minPoolSize == 0 {
-		minPoolSize = 1 // Default min pool size
-	}
-
 	maxConnIdleTime := time.Duration(mongoConfig.MaxConnIdleTimeSeconds) * time.Second
-	if maxConnIdleTime == 0 {
-		maxConnIdleTime = 5 * time.Minute // Default: 5 minutes
-	}
 
 	clientOpts := options.Client().
 		ApplyURI(mongoConfig.URI).

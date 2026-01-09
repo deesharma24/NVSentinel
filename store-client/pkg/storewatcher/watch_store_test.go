@@ -189,6 +189,9 @@ func TestChangeStreamWatcher_Start(t *testing.T) {
 			"_id":           bson.M{"ts": int64(2), "t": int32(2)},
 		}, receivedEvents[1])
 
+		// Set client to nil before Close() because mtest manages client lifecycle
+		// and will call Disconnect() in its cleanup - avoid double disconnect
+		watcher.client = nil
 		err = watcher.Close(ctx)
 		require.NoError(t, err)
 	})
@@ -289,6 +292,8 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer closeCancel()
+		// Set client to nil before Close() - mtest manages client lifecycle
+		watcher.client = nil
 		err = watcher.Close(closeCtx)
 		require.NoError(t, err)
 	})
@@ -352,6 +357,8 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer closeCancel()
+		// Set client to nil before Close() - mtest manages client lifecycle
+		watcher.client = nil
 		err = watcher.Close(closeCtx)
 		require.NoError(t, err)
 
@@ -422,6 +429,8 @@ func TestChangeStreamWatcher_MarkProcessed(t *testing.T) {
 
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer closeCancel()
+		// Set client to nil before Close() - mtest manages client lifecycle
+		watcher.client = nil
 		err = watcher.Close(closeCtx)
 		require.NoError(t, err)
 
