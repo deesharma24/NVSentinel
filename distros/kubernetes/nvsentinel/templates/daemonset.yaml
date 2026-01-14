@@ -145,6 +145,9 @@ spec:
                   fieldPath: metadata.name
             - name: LOG_LEVEL
               value: "{{ .Values.platformConnector.logLevel }}"
+            # App name for connection identification in logs and currentOp
+            - name: APP_NAME
+              value: "platform-connector"
             {{- if .Values.global.auditLogging.enabled }}
             {{- include "nvsentinel.auditLogging.envVars" . | nindent 12 }}
             {{- end }}

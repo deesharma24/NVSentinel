@@ -61,6 +61,8 @@ type MongoDBConfig struct {
 	// When provided, GetCertificate is used for dynamic client certificate loading.
 	// CA certificates are still loaded statically from ClientTLSCertConfig.CaCertPath.
 	CertWatcher *certwatcher.CertWatcher
+	// AppName is used to identify the client in MongoDB connection tracking
+	AppName string
 }
 
 // TokenConfig holds the token-specific configuration.
@@ -475,6 +477,21 @@ func (w *ChangeStreamWatcher) Close(ctx context.Context) error {
 		slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 	})
 
+	// Disconnect the MongoDB client to release connections
+	if w.client != nil {
+		if disconnectErr := w.client.Disconnect(ctx); disconnectErr != nil {
+			slog.Warn("Failed to disconnect MongoDB client",
+				"client", w.clientName,
+				"error", disconnectErr)
+			// Don't override the original error if changeStream.Close() failed
+			if err == nil {
+				err = fmt.Errorf("failed to disconnect MongoDB client for %s: %w", w.clientName, disconnectErr)
+			}
+		} else {
+			slog.Info("Successfully disconnected MongoDB client", "client", w.clientName)
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to close change stream for client %s: %w", w.clientName, err)
 	}
@@ -600,11 +617,18 @@ func constructMongoClientOptions(
 	// This uses the same timeout as the ping timeout for consistency
 	serverSelectionTimeout := time.Duration(mongoConfig.TotalPingTimeoutSeconds) * time.Second
 
-	return options.Client().
+	clientOpts := options.Client().
 		ApplyURI(mongoConfig.URI).
 		SetTLSConfig(tlsConfig).
 		SetAuth(credential).
-		SetServerSelectionTimeout(serverSelectionTimeout), nil
+		SetServerSelectionTimeout(serverSelectionTimeout)
+
+	// Set AppName for MongoDB connection tracking if provided
+	if mongoConfig.AppName != "" {
+		clientOpts.SetAppName(mongoConfig.AppName)
+	}
+
+	return clientOpts, nil
 }
 
 func constructDynamicTLSConfig(mongoConfig MongoDBConfig) (*tls.Config, error) {
