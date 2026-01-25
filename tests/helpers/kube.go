@@ -50,6 +50,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
 	kwokv1alpha1 "sigs.k8s.io/kwok/pkg/apis/v1alpha1"
@@ -152,7 +153,7 @@ This workaround can be removed after KACE-1703 is completed.
 */
 //nolint:cyclop,gocognit // Test helper with complex state machine logic
 func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, nodeName string,
-	labelValueSequence []string, success chan bool) error {
+	labelValueSequence []string, waitForLabelRemoval bool, success chan bool) error {
 	currentLabelIndex := 0
 	prevLabelValue := ""
 
@@ -203,6 +204,11 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 
 					currentLabelIndex++
 					if currentLabelIndex == len(labelValueSequence) {
+						if !waitForLabelRemoval {
+							t.Logf("[LabelWatcher] ✓ All labels observed, not waiting for removal. Sending SUCCESS to channel")
+							sendNodeLabelResult(ctx, success, true)
+						}
+
 						t.Logf("[LabelWatcher] ✓ All %d labels matched! Waiting for label removal...", len(labelValueSequence))
 					}
 				} else if actualValue != labelValueSequence[currentLabelIndex] && prevLabelValue != actualValue {
@@ -992,6 +998,21 @@ func UpdateConfigMapTOMLField[T any](
 	return nil
 }
 
+func ScaleDeployment(ctx context.Context, t *testing.T, c klient.Client, name, namespace string, replicas int32) error {
+	t.Logf("Scaling deployment %s/%s to %d", namespace, name, replicas)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &appsv1.Deployment{}
+		if err := c.Resources().Get(ctx, name, namespace, current); err != nil {
+			return err
+		}
+
+		current.Spec.Replicas = ptr.To(replicas)
+
+		return c.Resources().Update(ctx, current)
+	})
+}
+
 //nolint:cyclop,gocognit // Test helper with complex deployment rollout logic
 func WaitForDeploymentRollout(
 	ctx context.Context, t *testing.T, c klient.Client, name, namespace string,
@@ -1399,6 +1420,36 @@ func PatchServicePort(ctx context.Context, c klient.Client, namespace, serviceNa
 
 // SetNodeManagedByNVSentinel sets the ManagedByNVSentinel label on a node.
 func SetNodeManagedByNVSentinel(ctx context.Context, c klient.Client, nodeName string, managed bool) error {
+	labelValue := "false"
+	if managed {
+		labelValue = "true"
+	}
+
+	return SetNodeLabel(ctx, c, nodeName, "k8saas.nvidia.com/ManagedByNVSentinel", labelValue)
+}
+
+// RemoveNodeManagedByNVSentinelLabel removes the ManagedByNVSentinel label from a node.
+func RemoveNodeManagedByNVSentinelLabel(ctx context.Context, c klient.Client, nodeName string) error {
+	return RemoveNodeLabel(ctx, c, nodeName, "k8saas.nvidia.com/ManagedByNVSentinel")
+}
+
+func RemoveNodeLabel(ctx context.Context, c klient.Client, nodeName, labelKey string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := GetNodeByName(ctx, c, nodeName)
+		if err != nil {
+			return err
+		}
+
+		if node.Labels != nil {
+			delete(node.Labels, labelKey)
+			return c.Resources().Update(ctx, node)
+		}
+
+		return nil
+	})
+}
+
+func SetNodeLabel(ctx context.Context, c klient.Client, nodeName, labelKey, labelValue string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		node, err := GetNodeByName(ctx, c, nodeName)
 		if err != nil {
@@ -1409,30 +1460,9 @@ func SetNodeManagedByNVSentinel(ctx context.Context, c klient.Client, nodeName s
 			node.Labels = make(map[string]string)
 		}
 
-		if managed {
-			node.Labels["k8saas.nvidia.com/ManagedByNVSentinel"] = "true"
-		} else {
-			node.Labels["k8saas.nvidia.com/ManagedByNVSentinel"] = "false"
-		}
+		node.Labels[labelKey] = labelValue
 
 		return c.Resources().Update(ctx, node)
-	})
-}
-
-// RemoveNodeManagedByNVSentinelLabel removes the ManagedByNVSentinel label from a node.
-func RemoveNodeManagedByNVSentinelLabel(ctx context.Context, c klient.Client, nodeName string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, err := GetNodeByName(ctx, c, nodeName)
-		if err != nil {
-			return err
-		}
-
-		if node.Labels != nil {
-			delete(node.Labels, "k8saas.nvidia.com/ManagedByNVSentinel")
-			return c.Resources().Update(ctx, node)
-		}
-
-		return nil
 	})
 }
 
@@ -2545,6 +2575,13 @@ func RestoreDeploymentArgs(
 	t *testing.T, ctx context.Context, c klient.Client,
 	deploymentName, namespace, containerName string, originalArgs []string,
 ) error {
+	if originalArgs == nil {
+		return nil
+	}
+
+	t.Helper()
+	t.Logf("Restoring args %v for deployment %s/%s container %s", originalArgs, namespace, deploymentName, containerName)
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		deployment := &appsv1.Deployment{}
 		if err := c.Resources().Get(ctx, deploymentName, namespace, deployment); err != nil {
@@ -2572,4 +2609,40 @@ func RestoreDeploymentArgs(
 
 		return c.Resources().Update(ctx, deployment)
 	})
+}
+
+// DeleteExistingNodeEvents deletes Kubernetes node events for a given node name and event type and reason.
+// This is useful for cleaning up test events that might interfere with subsequent tests.
+func DeleteExistingNodeEvents(ctx context.Context, t *testing.T, c klient.Client,
+	nodeName, eventType, eventReason string) error {
+	t.Helper()
+	t.Logf("Deleting events for node %s with type=%s, reason=%s", nodeName, eventType, eventReason)
+
+	eventList, err := GetNodeEvents(ctx, c, nodeName, eventType)
+	if err != nil {
+		return fmt.Errorf("failed to get events for node %s: %w", nodeName, err)
+	}
+
+	deletedCount := 0
+
+	for _, event := range eventList.Items {
+		if eventReason != "" && event.Reason != eventReason {
+			continue
+		}
+
+		// Delete the event (events are in default namespace)
+		err := c.Resources().WithNamespace("default").Delete(ctx, &event)
+		if err != nil {
+			t.Logf("Warning: failed to delete event %s: %v", event.Name, err)
+			continue
+		}
+
+		deletedCount++
+
+		t.Logf("Deleted event: %s (type=%s, reason=%s)", event.Name, event.Type, event.Reason)
+	}
+
+	t.Logf("Deleted %d event(s) for node %s", deletedCount, nodeName)
+
+	return nil
 }
