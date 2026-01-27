@@ -81,56 +81,6 @@ kubernetes-object-monitor:
         recommendedAction: CONTACT_SUPPORT
         errorCode:
           - GPU_JOB_FAILED
-
-    # Example 3: Monitor Critical pods in gpu-operator namespace
-    - name: gpu-operator-pods-health
-      enabled: true
-      resource:
-        group: ""
-        version: v1
-        kind: Pod
-      predicate:
-        # Trigger event if:
-        # 1. Pod is in gpu-operator namespace
-        # 2. Pod has been assigned to a node (nodeName is set)
-        # 3. Pod is NOT Running AND NOT Succeeded
-        expression: |
-          resource.metadata.namespace == 'gpu-operator' && 
-          has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
-          resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded'
-      nodeAssociation:
-        expression: resource.spec.nodeName
-      healthEvent:
-        componentClass: Software
-        isFatal: true
-        message: "GPU Operator pod is not in Running state"
-        recommendedAction: CONTACT_SUPPORT
-        errorCode:
-          - GPU_OPERATOR_UNHEALTHY
-
-    # Example 4: Monitor Critical pods in network-operator namespace
-    - name: network-operator-pods-health
-      enabled: true
-      resource:
-        group: ""
-        version: v1
-        kind: Pod
-      predicate:
-        expression: |
-          resource.metadata.namespace == 'network-operator' && 
-          has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
-          resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded'
-      nodeAssociation:
-        expression: resource.spec.nodeName
-      healthEvent:
-        componentClass: Software
-        isFatal: true
-        message: "Network Operator pod is not in Running state"
-        recommendedAction: CONTACT_SUPPORT
-        errorCode:
-          - NETWORK_OPERATOR_UNHEALTHY
 ```
 
 ### Policy Configuration
