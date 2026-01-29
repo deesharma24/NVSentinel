@@ -1,4 +1,4 @@
-# Monitoring Critical Operators (pods in gpu-operator & network-operator namespace)
+# Monitoring Critical Operators (daemonset pods in gpu-operator & network-operator namespace)
 
 ## Overview
 For an NVIDIA GPU cluster to function correctly, critical infrastructure components under **gpu-operator** and **network-operator** namespace must be healthy. If these operators fail, the underlying hardware cannot be utilized effectively.
@@ -7,6 +7,8 @@ NVSentinel provides a built-in mechanism to monitor these operators and report h
 
 ## Configuration
 To monitor the GPU and Network operators, you must enable the `kubernetes-object-monitor` component and define the monitoring policies in your NVSentinel `values.yaml`.
+
+These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. If a DaemonSet pod is assigned to a node but fails to reach the `Running` state (and is not `Succeeded` or `Completed`), a health event is generated for that specific node. The reason daemonsets are only getting monitored and not deployments is because deployments can move from one node to another due to scheduling issue which doesn't imply that it is the node issue.
 
 Add the following configuration to your `values.yaml`:
 
@@ -18,6 +20,8 @@ global:
 
 # 2. Configure the policies
 kubernetes-object-monitor:
+  maxConcurrentReconciles: 1
+  resyncPeriod: 5m
   policies:
     # Policy 1: Monitor GPU Operator Namespace
     - name: gpu-operator-pods-health
@@ -30,12 +34,16 @@ kubernetes-object-monitor:
         # Trigger event if:
         # 1. Pod is in gpu-operator namespace
         # 2. Pod has been assigned to a node (nodeName is set)
-        # 3. Pod is NOT Running AND NOT Succeeded
+        # 3. Pod is NOT Running AND NOT Succeeded AND NOT Completed
+        # 4. Pod is owned by a DaemonSet
         expression: |
           resource.metadata.namespace == 'gpu-operator' && 
           has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
           resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded'
+          resource.status.phase != 'Succeeded' &&
+          resource.status.phase != 'Completed' &&
+          has(resource.metadata.ownerReferences) &&
+          resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet')
       nodeAssociation:
         expression: resource.spec.nodeName
       healthEvent:
@@ -58,7 +66,10 @@ kubernetes-object-monitor:
           resource.metadata.namespace == 'network-operator' && 
           has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
           resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded'
+          resource.status.phase != 'Succeeded' &&
+          resource.status.phase != 'Completed' &&
+          has(resource.metadata.ownerReferences) &&
+          resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet')
       nodeAssociation:
         expression: resource.spec.nodeName
       healthEvent:
