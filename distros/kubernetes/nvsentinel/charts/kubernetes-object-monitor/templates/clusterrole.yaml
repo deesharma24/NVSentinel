@@ -64,3 +64,22 @@ rules:
       - watch
   {{- end }}
   {{- end }}
+  # DaemonSets access is required for owner-level tracking
+  # When a policy uses tracking.level=owner, the controller needs to check if the
+  # DaemonSet still targets the node to decide whether to keep the node cordoned
+  {{- $hasOwnerTracking := false }}
+  {{- range .Values.policies }}
+    {{- if and .tracking (eq .tracking.level "owner") }}
+      {{- $hasOwnerTracking = true }}
+    {{- end }}
+  {{- end }}
+  {{- if $hasOwnerTracking }}
+  - apiGroups:
+      - "apps"
+    resources:
+      - daemonsets
+    verbs:
+      - get
+      - list
+      - watch
+  {{- end }}

@@ -23,7 +23,31 @@ type Policy struct {
 	Resource        ResourceSpec     `toml:"resource"`
 	Predicate       PredicateSpec    `toml:"predicate"`
 	NodeAssociation *AssociationSpec `toml:"nodeAssociation,omitempty"`
+	Tracking        *TrackingSpec    `toml:"tracking,omitempty"`
 	HealthEvent     HealthEventSpec  `toml:"healthEvent"`
+}
+
+// TrackingLevel defines how resources are tracked for state management
+type TrackingLevel string
+
+const (
+	// TrackingLevelResource tracks by individual resource name (default)
+	// stateKey = policyName/namespace/resourceName
+	TrackingLevelResource TrackingLevel = "resource"
+
+	// TrackingLevelOwner tracks by owner reference (for DaemonSet/ReplicaSet pods)
+	// stateKey = policyName/namespace/ownerKind/ownerName/nodeName
+	// When a pod is deleted, the node stays cordoned until:
+	// - A healthy replacement pod from the same owner appears on the node, OR
+	// - The owner is deleted, OR
+	// - The owner no longer targets this node (nodeSelector/taint change)
+	TrackingLevelOwner TrackingLevel = "owner"
+)
+
+// TrackingSpec configures how resources are tracked for cordon/uncordon decisions
+type TrackingSpec struct {
+	// Level specifies the tracking granularity: "resource" (default) or "owner"
+	Level TrackingLevel `toml:"level"`
 }
 
 type ResourceSpec struct {
@@ -56,4 +80,22 @@ func (r *ResourceSpec) GVK() string {
 	}
 
 	return r.Group + "/" + r.Version + "/" + r.Kind
+}
+
+// GetTrackingLevel returns the tracking level for the policy, defaulting to resource-level tracking
+func (p *Policy) GetTrackingLevel() TrackingLevel {
+	if p.Tracking == nil || p.Tracking.Level == "" {
+		return TrackingLevelResource
+	}
+
+	return p.Tracking.Level
+}
+
+// ResourceInfo contains the metadata needed to identify a resource in health events.
+// This is used to populate the entitiesImpacted field, which allows fault-quarantine
+// to track each resource individually.
+type ResourceInfo struct {
+	Kind      string
+	Namespace string
+	Name      string
 }

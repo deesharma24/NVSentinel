@@ -3778,6 +3778,7 @@ platformConnector:
     #     isFatal: false
 kubernetes-object-monitor:
   logLevel: debug
+  resyncPeriod: 30s
 
   policies:
     - name: node-test-condition
@@ -3796,6 +3797,50 @@ kubernetes-object-monitor:
         recommendedAction: CONTACT_SUPPORT
         errorCode:
           - NODE_TEST_CONDITION_NOT_READY
+
+    # This policy monitors DaemonSet pods in the gpu-operator namespace and publishes
+    # fatal health events when pods are not in Running or Succeeded state
+    #
+    # Uses owner-level tracking: when a pod is deleted which is owned by a DaemonSet, the node stays cordoned
+    # until either:
+    # - A healthy replacement pod from the same DaemonSet appears
+    # - The owner (DaemonSet) is deleted
+    # - The owner no longer targets this node (nodeSelector/taint change)
+    - name: gpu-operator-pod-health
+      enabled: true
+      resource:
+        group: ""
+        version: v1
+        kind: Pod
+      predicate:
+        # Trigger event if:
+        # 1. Pod is in gpu-operator namespace
+        # 2. Pod is owned by a DaemonSet (required for owner-level tracking)
+        # 3. Pod has been assigned to a node (nodeName is set)
+        # 4. Pod is NOT in Running or Succeeded state
+        expression: |
+          resource.metadata.namespace == 'gpu-operator' && 
+          has(resource.metadata.ownerReferences) &&
+          resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet') &&
+          has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
+          resource.status.phase != 'Running' && 
+          resource.status.phase != 'Succeeded' &&
+          has(resource.status.startTime) &&
+          now - timestamp(resource.status.startTime) > duration('30s')
+      nodeAssociation:
+        expression: resource.spec.nodeName
+      # Track by owner (DaemonSet) instead of individual pod name
+      # This ensures node stays cordoned when a pod is deleted until a healthy
+      # replacement pod is running
+      tracking:
+        level: owner
+      healthEvent:
+        componentClass: Software
+        isFatal: true
+        message: "GPU Operator DaemonSet pod has not reached Running state within 30 seconds"
+        recommendedAction: CONTACT_SUPPORT
+        errorCode:
+          - GPU_OPERATOR_POD_UNHEALTHY
 
   affinity:
     podAntiAffinity:
