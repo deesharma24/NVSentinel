@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -45,6 +46,10 @@ const (
 	testConditionType        = "TestCondition"
 	gpuOperatorNamespace     = "gpu-operator"
 	gpuOperatorPodPolicyName = "gpu-operator-pod-health"
+
+	// policyTimeoutWait is the time to wait for policy timeout to elapse.
+	// Calculated as: policy delay (30s) + resync period (30s) + buffer (10s)
+	policyTimeoutWait = 70 * time.Second
 )
 
 func TestKubernetesObjectMonitor(t *testing.T) {
@@ -385,9 +390,7 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 
 		// Ensure gpu-operator namespace exists
 		err = helpers.CreateNamespace(ctx, client, gpuOperatorNamespace)
-		if err != nil {
-			t.Logf("Namespace %s may already exist: %v", gpuOperatorNamespace, err)
-		}
+		require.NoError(t, err, "failed to create namespace %s", gpuOperatorNamespace)
 
 		testCtx = &daemonSetOwnerTestContext{
 			NodeName:       testNodeName,
@@ -399,7 +402,6 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		// Clean up any leftover resources from previous runs
 		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName)
 		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName2)
-		time.Sleep(2 * time.Second)
 
 		return ctx
 	})
@@ -433,9 +435,8 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		t.Log("Waiting 70s for policy timeout to elapse (single wait for all DaemonSets)")
-		// 30s policy delay + 30s resync period + 10s buffer
-		time.Sleep(70 * time.Second)
+		t.Log("Waiting for policy timeout to elapse (single wait for all DaemonSets)")
+		time.Sleep(policyTimeoutWait)
 
 		return ctx
 	})
@@ -600,9 +601,8 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
 		// Wait for policy timeout (need to wait again for this new DaemonSet)
-		t.Log("Waiting 70s for policy timeout for deletion test")
-		// 30s policy delay + 30s resync period + 10s buffer
-		time.Sleep(70 * time.Second)
+		t.Log("Waiting for policy timeout for deletion test")
+		time.Sleep(policyTimeoutWait)
 
 		// Verify node is cordoned
 		require.Eventually(t, func() bool {
@@ -638,9 +638,13 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 
 		// Ensure node is uncordoned
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
-		if err == nil && node.Spec.Unschedulable {
+		if err != nil {
+			t.Logf("Warning: failed to get node for cleanup: %v", err)
+		} else if node.Spec.Unschedulable {
 			node.Spec.Unschedulable = false
-			_ = client.Resources().Update(ctx, node)
+			if updateErr := client.Resources().Update(ctx, node); updateErr != nil {
+				t.Logf("Warning: failed to uncordon node during teardown: %v", updateErr)
+			}
 		}
 
 		return ctx
@@ -710,7 +714,7 @@ func createTestDaemonSetWithUniqueSelector(name, namespace, nodeName string, sho
 			{
 				Name:    "init-blocker",
 				Image:   "busybox:latest",
-				Command: []string{"sh", "-c", "sleep infinity"},
+				Command: []string{"sh", "-c", "sleep 3600"},
 			},
 		}
 	}
@@ -744,72 +748,6 @@ func createTestDaemonSetWithUniqueSelector(name, namespace, nodeName string, sho
 }
 
 // Helper functions for DaemonSet tests
-
-// createTestDaemonSet creates a DaemonSet for testing owner-level tracking.
-//
-// When shouldFail=true, the pod uses an init container that sleeps forever,
-// keeping the pod in "Pending" (Init:0/1) state. This matches the policy condition
-// which checks for pods NOT in Running/Succeeded phase.
-func createTestDaemonSet(name, namespace, nodeName string, shouldFail bool) *appsv1.DaemonSet {
-	podSpec := v1.PodSpec{
-		// Target specific node using nodeSelector
-		NodeSelector: map[string]string{
-			"kubernetes.io/hostname": nodeName,
-		},
-		Containers: []v1.Container{
-			{
-				Name:    "main",
-				Image:   "busybox:latest",
-				Command: []string{"sh", "-c", "sleep 3600"},
-			},
-		},
-		RestartPolicy: v1.RestartPolicyAlways,
-		// Tolerate all taints to ensure pod can be scheduled
-		Tolerations: []v1.Toleration{
-			{Operator: v1.TolerationOpExists},
-		},
-	}
-
-	// For failing pods, add an init container that never completes
-	// This keeps the pod in Pending (Init:0/1) state, which triggers the policy
-	if shouldFail {
-		podSpec.InitContainers = []v1.Container{
-			{
-				Name:    "init-blocker",
-				Image:   "busybox:latest",
-				Command: []string{"sh", "-c", "sleep infinity"},
-			},
-		}
-	}
-
-	return &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app":  "test-owner-tracking",
-				"test": "kubernetes-object-monitor",
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": "test-owner-tracking",
-				},
-			},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":  "test-owner-tracking",
-						"test": "kubernetes-object-monitor",
-					},
-				},
-				Spec: podSpec,
-			},
-		},
-	}
-}
-
 // listDaemonSetPods returns all pods owned by the specified DaemonSet
 func listDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsName string) ([]v1.Pod, error) {
 	var podList v1.PodList
@@ -830,7 +768,7 @@ func listDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsN
 	return dsPods, nil
 }
 
-// cleanupDaemonSet deletes a DaemonSet and waits for its pods to be deleted
+// cleanupDaemonSet deletes a DaemonSet and waits for it and its pods to be fully deleted
 func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, namespace, name string) {
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -838,13 +776,29 @@ func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, n
 			Namespace: namespace,
 		},
 	}
-	_ = client.Resources().Delete(ctx, ds)
+	if err := client.Resources().Delete(ctx, ds); err != nil {
+		t.Logf("Note: DaemonSet deletion returned error (may be expected if not found): %v", err)
+	}
 
 	// Wait for pods to be deleted
 	require.Eventually(t, func() bool {
 		pods, err := listDaemonSetPods(ctx, client, namespace, name)
 		return err == nil && len(pods) == 0
 	}, 2*time.Minute, 5*time.Second)
+
+	// Wait for DaemonSet to be fully deleted
+	require.Eventually(t, func() bool {
+		err := client.Resources(namespace).Get(ctx, name, namespace, &appsv1.DaemonSet{})
+		if err == nil {
+			return false // Object still exists
+		}
+		if apierrors.IsNotFound(err) {
+			return true // Deleted successfully
+		}
+		// Transient error - log and retry
+		t.Logf("Note: transient error checking DaemonSet deletion: %v", err)
+		return false
+	}, 30*time.Second, 1*time.Second)
 }
 
 // updateDaemonSetToHealthy updates a DaemonSet to remove the blocking init container,

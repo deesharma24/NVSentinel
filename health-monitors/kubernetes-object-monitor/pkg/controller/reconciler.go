@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -222,6 +223,7 @@ func (r *ResourceReconciler) cleanupDeletedResourceOwnerLevel(
 	p *config.Policy,
 ) {
 	// Find all matching state entries for this policy and namespace
+	// State key format for owner-level: policyName/namespace/ownerKind/ownerName/nodeName
 	prefix := fmt.Sprintf("%s/%s/", p.Name, req.Namespace)
 
 	r.matchStatesMu.RLock()
@@ -229,7 +231,7 @@ func (r *ResourceReconciler) cleanupDeletedResourceOwnerLevel(
 	matches := make(map[string]matchStateInfo)
 
 	for stateKey, info := range r.matchStateInfos {
-		if len(stateKey) > len(prefix) && stateKey[:len(prefix)] == prefix {
+		if strings.HasPrefix(stateKey, prefix) {
 			matches[stateKey] = info
 		}
 	}

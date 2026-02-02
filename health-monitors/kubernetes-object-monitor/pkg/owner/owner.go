@@ -41,18 +41,6 @@ import (
 
 const (
 	// cacheTTL is how long cached DaemonSet and Node entries are valid.
-	//
-	// Trade-off considerations:
-	// - Longer TTL = fewer API calls, better for large clusters (2000+ nodes)
-	// - Shorter TTL = faster response to DaemonSet deletion/modification
-	//
-	// 15 minutes is chosen because:
-	// 1. DaemonSet configurations rarely change in production
-	// 2. Pod startup can take 10-15 minutes (image pull, init containers)
-	// 3. Worst case: if DaemonSet is deleted, node uncordons within 15 min
-	//
-	// Note: This cache only affects the "should node stay cordoned after pod deletion"
-	// check. Pod health monitoring uses direct watches and is not affected by this cache.
 	cacheTTL = 30 * time.Second
 )
 
@@ -192,6 +180,15 @@ func (r *Resolver) getCachedDaemonSet(ctx context.Context, namespace, name strin
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
 
+	// Re-check cache in case another goroutine populated it while we were fetching
+	if entry, ok := r.cache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+		if entry.notFound {
+			return nil, false, nil
+		}
+
+		return entry.obj.(*appsv1.DaemonSet), true, nil
+	}
+
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			r.cache[cacheKey] = cacheEntry{notFound: true, expiresAt: time.Now().Add(cacheTTL)}
@@ -232,6 +229,15 @@ func (r *Resolver) getCachedNode(ctx context.Context, name string) (*v1.Node, bo
 
 	r.cacheMu.Lock()
 	defer r.cacheMu.Unlock()
+
+	// Re-check cache in case another goroutine populated it while we were fetching
+	if entry, ok := r.cache[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+		if entry.notFound {
+			return nil, false, nil
+		}
+
+		return entry.obj.(*v1.Node), true, nil
+	}
 
 	if err != nil {
 		if apierrors.IsNotFound(err) {

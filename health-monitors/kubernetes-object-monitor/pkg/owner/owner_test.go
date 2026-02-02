@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -54,7 +55,7 @@ func TestGetControllerOwner(t *testing.T) {
 					APIVersion: "apps/v1",
 					Kind:       "DaemonSet",
 					Name:       "nvidia-driver",
-					Controller: boolPtr(true),
+					Controller: ptr.To(true),
 				},
 			},
 			expectedOwner: &Info{
@@ -70,7 +71,7 @@ func TestGetControllerOwner(t *testing.T) {
 					APIVersion: "apps/v1",
 					Kind:       "DaemonSet",
 					Name:       "nvidia-driver",
-					Controller: boolPtr(false),
+					Controller: ptr.To(false),
 				},
 			},
 			expectedNil: true,
@@ -82,13 +83,13 @@ func TestGetControllerOwner(t *testing.T) {
 					APIVersion: "v1",
 					Kind:       "Node",
 					Name:       "node-1",
-					Controller: boolPtr(false),
+					Controller: ptr.To(false),
 				},
 				{
 					APIVersion: "apps/v1",
 					Kind:       "ReplicaSet",
 					Name:       "my-deployment-abc123",
-					Controller: boolPtr(true),
+					Controller: ptr.To(true),
 				},
 			},
 			expectedOwner: &Info{
@@ -509,8 +510,4 @@ func TestOwnerTargetsNode(t *testing.T) {
 			assert.Equal(t, tt.expectedNodeExists, nodeExists)
 		})
 	}
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

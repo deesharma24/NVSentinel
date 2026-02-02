@@ -35,7 +35,7 @@ const (
 	// stateKey = policyName/namespace/resourceName
 	TrackingLevelResource TrackingLevel = "resource"
 
-	// TrackingLevelOwner tracks by owner reference (for DaemonSet/ReplicaSet pods)
+	// TrackingLevelOwner tracks by owner reference (for DaemonSet pods)
 	// stateKey = policyName/namespace/ownerKind/ownerName/nodeName
 	// When a pod is deleted, the node stays cordoned until:
 	// - A healthy replacement pod from the same owner appears on the node, OR

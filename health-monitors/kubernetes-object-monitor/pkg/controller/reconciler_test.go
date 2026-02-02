@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -725,8 +726,6 @@ func TestReconciler_PodWithReplicaSetOwner_SkippedWithOwnerLevelTracking(t *test
 	}, 500*time.Millisecond, 50*time.Millisecond)
 }
 
-// Note: Pod deletion tests are covered by E2E tests in tests/kubernetes_object_monitor_test.go
-// because envtest has limitations with Pod deletion (finalizers, garbage collection).
 // The E2E tests cover:
 // - Pod deletion with owner-level tracking (DaemonSet exists - no uncordon)
 // - Pod deletion with owner-level tracking (DaemonSet deleted - uncordon)
@@ -1214,7 +1213,7 @@ func createNamespace(t *testing.T, setup *testSetup, name string) {
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 	}
 	err := setup.k8sClient.Create(setup.ctx, ns)
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		require.NoError(t, err)
 	}
 }
@@ -1277,43 +1276,6 @@ func updatePodPhase(t *testing.T, setup *testSetup, namespace, name string, phas
 	}, time.Second, 50*time.Millisecond)
 }
 
-func deletePod(t *testing.T, setup *testSetup, namespace, name string) {
-	t.Helper()
-
-	pod := &v1.Pod{}
-	err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Namespace: namespace, Name: name}, pod)
-	if err != nil {
-		// Pod already deleted
-		return
-	}
-
-	// Delete with propagation policy to ensure immediate deletion
-	require.NoError(t, setup.k8sClient.Delete(setup.ctx, pod, client.PropagationPolicy(metav1.DeletePropagationForeground)))
-
-	require.Eventually(t, func() bool {
-		err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Namespace: namespace, Name: name}, &v1.Pod{})
-		return err != nil && strings.Contains(err.Error(), "not found")
-	}, 5*time.Second, 100*time.Millisecond)
-}
-
-func deleteNode(t *testing.T, setup *testSetup, name string) {
-	t.Helper()
-
-	node := &v1.Node{}
-	err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Name: name}, node)
-	if err != nil {
-		// Node already deleted
-		return
-	}
-
-	require.NoError(t, setup.k8sClient.Delete(setup.ctx, node))
-
-	require.Eventually(t, func() bool {
-		err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Name: name}, &v1.Node{})
-		return err != nil && strings.Contains(err.Error(), "not found")
-	}, 5*time.Second, 100*time.Millisecond)
-}
-
 func createDaemonSet(t *testing.T, setup *testSetup, namespace, name string) *appsv1.DaemonSet {
 	t.Helper()
 
@@ -1349,24 +1311,6 @@ func createDaemonSet(t *testing.T, setup *testSetup, namespace, name string) *ap
 	}, time.Second, 50*time.Millisecond)
 
 	return ds
-}
-
-func deleteDaemonSet(t *testing.T, setup *testSetup, namespace, name string) {
-	t.Helper()
-
-	ds := &appsv1.DaemonSet{}
-	err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Namespace: namespace, Name: name}, ds)
-	if err != nil {
-		// DaemonSet already deleted
-		return
-	}
-
-	require.NoError(t, setup.k8sClient.Delete(setup.ctx, ds, client.PropagationPolicy(metav1.DeletePropagationForeground)))
-
-	require.Eventually(t, func() bool {
-		err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Namespace: namespace, Name: name}, &appsv1.DaemonSet{})
-		return err != nil && strings.Contains(err.Error(), "not found")
-	}, 5*time.Second, 100*time.Millisecond)
 }
 
 func createDaemonSetOwnerRef(dsName string) *metav1.OwnerReference {
