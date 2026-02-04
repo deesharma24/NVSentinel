@@ -24,7 +24,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -527,12 +526,12 @@ func TestReconciler_ColdStart(t *testing.T) {
 }
 
 // =============================================================================
-// Pod-based policy tests with owner-level tracking
+// Pod-based policy tests
 // =============================================================================
 
 // TestReconciler_PodUnhealthyOnNode tests that an unhealthy pod triggers a health event
 func TestReconciler_PodUnhealthyOnNode(t *testing.T) {
-	setup := setupPodTest(t, false) // resource-level tracking
+	setup := setupPodTest(t)
 	nodeName := "test-node-pod-1"
 	namespace := "gpu-operator"
 	podName := "test-pod-1"
@@ -544,7 +543,7 @@ func TestReconciler_PodUnhealthyOnNode(t *testing.T) {
 	createNamespace(t, setup, namespace)
 
 	// Create a pod in Pending phase (unhealthy)
-	createPod(t, setup, namespace, podName, nodeName, v1.PodPending, nil)
+	createPod(t, setup, namespace, podName, nodeName, v1.PodPending)
 
 	result, err := setup.reconciler.Reconcile(setup.ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Namespace: namespace, Name: podName},
@@ -569,7 +568,7 @@ func TestReconciler_PodUnhealthyOnNode(t *testing.T) {
 
 // TestReconciler_PodHealthyOnNode tests that a pod becoming healthy triggers a healthy event
 func TestReconciler_PodHealthyOnNode(t *testing.T) {
-	setup := setupPodTest(t, false) // resource-level tracking
+	setup := setupPodTest(t)
 	nodeName := "test-node-pod-2"
 	namespace := "gpu-operator"
 	podName := "test-pod-2"
@@ -581,7 +580,7 @@ func TestReconciler_PodHealthyOnNode(t *testing.T) {
 	createNamespace(t, setup, namespace)
 
 	// Create a pod in Pending phase (unhealthy)
-	createPod(t, setup, namespace, podName, nodeName, v1.PodPending, nil)
+	createPod(t, setup, namespace, podName, nodeName, v1.PodPending)
 
 	// First reconcile - should publish unhealthy event
 	result, err := setup.reconciler.Reconcile(setup.ctx, ctrl.Request{
@@ -617,119 +616,6 @@ func TestReconciler_PodHealthyOnNode(t *testing.T) {
 			event.resourceInfo.Name == podName
 	}, time.Second, 50*time.Millisecond)
 }
-
-// TestReconciler_PodWithOwnerLevelTracking tests that owner-level tracking
-// uses the DaemonSet owner info in the published event
-func TestReconciler_PodWithOwnerLevelTracking(t *testing.T) {
-	setup := setupPodTest(t, true) // owner-level tracking
-	nodeName := "test-node-pod-3"
-	namespace := "gpu-operator"
-	podName := "test-ds-pod-1"
-	dsName := "test-daemonset-1"
-
-	// Create the node first
-	createNode(t, setup, nodeName, v1.ConditionTrue)
-
-	// Create namespace
-	createNamespace(t, setup, namespace)
-
-	// Create a DaemonSet
-	createDaemonSet(t, setup, namespace, dsName)
-
-	// Create a pod owned by the DaemonSet in Pending phase (unhealthy)
-	ownerRef := createDaemonSetOwnerRef(dsName)
-	createPod(t, setup, namespace, podName, nodeName, v1.PodPending, ownerRef)
-
-	// Reconcile - should publish unhealthy event with DaemonSet as entity type
-	result, err := setup.reconciler.Reconcile(setup.ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: namespace, Name: podName},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	require.Eventually(t, func() bool {
-		return len(setup.publisher.publishedEvents) == 1 && !setup.publisher.publishedEvents[0].isHealthy
-	}, time.Second, 50*time.Millisecond)
-
-	// Verify the event has DaemonSet as entity type (owner-level tracking)
-	event := setup.publisher.publishedEvents[0]
-	assert.Equal(t, "DaemonSet", event.resourceInfo.Kind)
-	assert.Equal(t, dsName, event.resourceInfo.Name)
-	assert.Equal(t, namespace, event.resourceInfo.Namespace)
-	assert.Equal(t, nodeName, event.nodeName)
-}
-
-// TestReconciler_PodWithoutOwner_SkippedWithOwnerLevelTracking tests that pods without
-// a DaemonSet owner are skipped when owner-level tracking is enabled.
-// This ensures only DaemonSet pods are monitored, as they are the ones expected to have
-// replacement pods on the same node.
-func TestReconciler_PodWithoutOwner_SkippedWithOwnerLevelTracking(t *testing.T) {
-	setup := setupPodTest(t, true) // owner-level tracking enabled, but pod has no owner
-	nodeName := "test-node-pod-4"
-	namespace := "gpu-operator"
-	podName := "test-standalone-pod"
-
-	// Create the node first
-	createNode(t, setup, nodeName, v1.ConditionTrue)
-
-	// Create namespace
-	createNamespace(t, setup, namespace)
-
-	// Create a pod WITHOUT owner reference in Pending phase (unhealthy)
-	createPod(t, setup, namespace, podName, nodeName, v1.PodPending, nil)
-
-	// Reconcile - should NOT publish any event because pod has no DaemonSet owner
-	// and owner-level tracking is enabled
-	result, err := setup.reconciler.Reconcile(setup.ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: namespace, Name: podName},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Verify NO event was published (pod without DaemonSet owner is skipped)
-	require.Never(t, func() bool {
-		return len(setup.publisher.publishedEvents) > 0
-	}, 500*time.Millisecond, 50*time.Millisecond)
-}
-
-// TestReconciler_PodWithReplicaSetOwner_SkippedWithOwnerLevelTracking tests that pods
-// owned by ReplicaSets (not DaemonSets) are skipped when owner-level tracking is enabled.
-// Only DaemonSet pods should be tracked because they are expected to have replacements
-// on the same node.
-func TestReconciler_PodWithReplicaSetOwner_SkippedWithOwnerLevelTracking(t *testing.T) {
-	setup := setupPodTest(t, true) // owner-level tracking enabled
-	nodeName := "test-node-pod-5"
-	namespace := "gpu-operator"
-	podName := "test-rs-pod"
-	rsName := "test-replicaset"
-
-	// Create the node first
-	createNode(t, setup, nodeName, v1.ConditionTrue)
-
-	// Create namespace
-	createNamespace(t, setup, namespace)
-
-	// Create a pod owned by a ReplicaSet (not DaemonSet) in Pending phase
-	ownerRef := createReplicaSetOwnerRef(rsName)
-	createPod(t, setup, namespace, podName, nodeName, v1.PodPending, ownerRef)
-
-	// Reconcile - should NOT publish any event because pod owner is ReplicaSet, not DaemonSet
-	result, err := setup.reconciler.Reconcile(setup.ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Namespace: namespace, Name: podName},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Verify NO event was published (pod with non-DaemonSet owner is skipped)
-	require.Never(t, func() bool {
-		return len(setup.publisher.publishedEvents) > 0
-	}, 500*time.Millisecond, 50*time.Millisecond)
-}
-
-// The E2E tests cover:
-// - Pod deletion with owner-level tracking (DaemonSet exists - no uncordon)
-// - Pod deletion with owner-level tracking (DaemonSet deleted - uncordon)
-// - Node deletion cleanup
 
 type testSetup struct {
 	ctx        context.Context
@@ -1114,8 +1000,8 @@ func gpuJobCRD() *apiextensionsv1.CustomResourceDefinition {
 // Pod-based policy helper functions
 // =============================================================================
 
-func defaultPodHealthPolicy(ownerLevelTracking bool) config.Policy {
-	policy := config.Policy{
+func defaultPodHealthPolicy() config.Policy {
+	return config.Policy{
 		Name:    "gpu-operator-pod-health",
 		Enabled: true,
 		Resource: config.ResourceSpec{
@@ -1141,17 +1027,9 @@ func defaultPodHealthPolicy(ownerLevelTracking bool) config.Policy {
 			ErrorCode:         []string{"GPU_OPERATOR_POD_UNHEALTHY"},
 		},
 	}
-
-	if ownerLevelTracking {
-		policy.Tracking = &config.TrackingSpec{
-			Level: "owner",
-		}
-	}
-
-	return policy
 }
 
-func setupPodTest(t *testing.T, ownerLevelTracking bool) *testSetup {
+func setupPodTest(t *testing.T) *testSetup {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1171,7 +1049,7 @@ func setupPodTest(t *testing.T, ownerLevelTracking bool) *testSetup {
 		publishedEvents: []mockPublishedEvent{},
 	}
 
-	policies := []config.Policy{defaultPodHealthPolicy(ownerLevelTracking)}
+	policies := []config.Policy{defaultPodHealthPolicy()}
 
 	celEnvironment, err := celenv.NewEnvironment(k8sClient)
 	require.NoError(t, err)
@@ -1218,7 +1096,7 @@ func createNamespace(t *testing.T, setup *testSetup, name string) {
 	}
 }
 
-func createPod(t *testing.T, setup *testSetup, namespace, name, nodeName string, phase v1.PodPhase, ownerRef *metav1.OwnerReference) *v1.Pod {
+func createPod(t *testing.T, setup *testSetup, namespace, name, nodeName string, phase v1.PodPhase) *v1.Pod {
 	t.Helper()
 
 	pod := &v1.Pod{
@@ -1235,10 +1113,6 @@ func createPod(t *testing.T, setup *testSetup, namespace, name, nodeName string,
 				},
 			},
 		},
-	}
-
-	if ownerRef != nil {
-		pod.OwnerReferences = []metav1.OwnerReference{*ownerRef}
 	}
 
 	require.NoError(t, setup.k8sClient.Create(setup.ctx, pod))
@@ -1274,63 +1148,4 @@ func updatePodPhase(t *testing.T, setup *testSetup, namespace, name string, phas
 		}
 		return updatedPod.Status.Phase == phase
 	}, time.Second, 50*time.Millisecond)
-}
-
-func createDaemonSet(t *testing.T, setup *testSetup, namespace, name string) *appsv1.DaemonSet {
-	t.Helper()
-
-	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": name},
-			},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": name},
-				},
-				Spec: v1.PodSpec{
-					Containers: []v1.Container{
-						{
-							Name:  "test-container",
-							Image: "busybox",
-						},
-					},
-				},
-			},
-		},
-	}
-	require.NoError(t, setup.k8sClient.Create(setup.ctx, ds))
-
-	require.Eventually(t, func() bool {
-		err := setup.k8sClient.Get(setup.ctx, types.NamespacedName{Namespace: namespace, Name: name}, ds)
-		return err == nil
-	}, time.Second, 50*time.Millisecond)
-
-	return ds
-}
-
-func createDaemonSetOwnerRef(dsName string) *metav1.OwnerReference {
-	controller := true
-	return &metav1.OwnerReference{
-		APIVersion: "apps/v1",
-		Kind:       "DaemonSet",
-		Name:       dsName,
-		UID:        types.UID("test-ds-uid-" + dsName),
-		Controller: &controller,
-	}
-}
-
-func createReplicaSetOwnerRef(rsName string) *metav1.OwnerReference {
-	controller := true
-	return &metav1.OwnerReference{
-		APIVersion: "apps/v1",
-		Kind:       "ReplicaSet",
-		Name:       rsName,
-		UID:        types.UID("test-rs-uid-" + rsName),
-		Controller: &controller,
-	}
 }

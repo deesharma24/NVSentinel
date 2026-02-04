@@ -8,7 +8,7 @@ NVSentinel provides a built-in mechanism to monitor these operators and report h
 ## Configuration
 To monitor the GPU and Network operators, you must enable the `kubernetes-object-monitor` component and define the monitoring policies in your NVSentinel `values.yaml`.
 
-These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. A health event is generated if a pod:
+These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. A health event is generated if a daemonset pod:
 - Has been assigned to a node, AND
 - Has **not** reached `Running` or `Succeeded` state within the configured threshold 
 
@@ -19,26 +19,17 @@ This threshold allows sufficient time for normal pod initialization (image pulls
 - `ImagePullBackOff` errors
 - Any other state preventing the pod from becoming healthy
 
-### Owner-Level Tracking (DaemonSet Only)
+### Pod Health Tracking (DaemonSet Only)
 
-The policies use **owner-level tracking** (`tracking.level: owner`) for DaemonSet pods. This ensures that when a DaemonSet pod is deleted (e.g., during troubleshooting or node maintenance), the node stays cordoned until:
-- A **healthy replacement pod** from the same DaemonSet appears on the node, OR
-- The **DaemonSet is deleted**, OR
-- The **DaemonSet no longer targets this node** (due to nodeSelector or taint changes)
+The policies track individual pods owned by daemonsets by name. When a pod's health state changes:
+- **Pod becomes unhealthy** → Node is cordoned
+- **Pod becomes healthy** → Node is uncordoned
+- **Pod is deleted** → Node is uncordoned (if a replacement pod comes up unhealthy, it will re-cordon the node)
 
-This prevents premature uncordoning when a pod is deleted but the underlying issue hasn't been resolved.
-
-> **Important:** Owner-level tracking **only applies to DaemonSet-owned pods**. Pods without an owner or with non-DaemonSet owners (ReplicaSet, Deployment, Job, StatefulSet, etc.) are **silently skipped** when `tracking.level: owner` is configured. This is by design because:
-> - DaemonSets guarantee one pod per node, so replacements appear on the same node
-> - ReplicaSet/Deployment pods can be scheduled on any node, so tracking by owner doesn't make sense
-> - Jobs may not create replacement pods at all
->
-> **Best Practice:** When using `tracking.level: owner`, include a DaemonSet owner check in your CEL predicate:
-> ```cel
-> has(resource.metadata.ownerReferences) &&
-> resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet')
-> ```
-> This is more efficient (avoids evaluating non-DaemonSet pods) and makes the policy's intent explicit.
+This approach ensures that:
+- Healthy pods always result in uncordoned nodes
+- Multiple unhealthy pods on the same node are tracked independently
+- Each pod must become healthy (or be deleted) for the node to be uncordoned
 
 Add the following configuration to your `values.yaml`:
 
@@ -63,7 +54,7 @@ kubernetes-object-monitor:
       predicate:
         # Trigger event if:
         # 1. Pod is in gpu-operator namespace
-        # 2. Pod is owned by a DaemonSet (required for owner-level tracking)
+        # 2. Pod is owned by a DaemonSet (we only monitor DaemonSet pods)
         # 3. Pod has been assigned to a node (nodeName is set)
         # 4. Pod is NOT in Running or Succeeded state
         # 5. Pod has been in this non-healthy state for more than configured threshold
@@ -78,11 +69,6 @@ kubernetes-object-monitor:
           now - timestamp(resource.status.startTime) > duration('30m')
       nodeAssociation:
         expression: resource.spec.nodeName
-      # Track by owner (DaemonSet) instead of individual pod name
-      # This ensures node stays cordoned when a pod is deleted until a healthy
-      # replacement pod is running
-      tracking:
-        level: owner
       healthEvent:
         componentClass: Software
         isFatal: true
@@ -99,7 +85,12 @@ kubernetes-object-monitor:
         version: v1
         kind: Pod
       predicate:
-        # Only match DaemonSet pods - required for owner-level tracking
+        # Trigger event if:
+        # 1. Pod is in network-operator namespace
+        # 2. Pod is owned by a DaemonSet
+        # 3. Pod has been assigned to a node (nodeName is set)
+        # 4. Pod is NOT in Running or Succeeded state
+        # 5. Pod has been in this non-healthy state for more than configured threshold
         expression: |
           resource.metadata.namespace == 'network-operator' && 
           has(resource.metadata.ownerReferences) &&
@@ -111,8 +102,6 @@ kubernetes-object-monitor:
           now - timestamp(resource.status.startTime) > duration('30m')
       nodeAssociation:
         expression: resource.spec.nodeName
-      tracking:
-        level: owner
       healthEvent:
         componentClass: Software
         isFatal: true
@@ -126,67 +115,56 @@ kubernetes-object-monitor:
 
 The policy triggers when **all** of the following conditions are true:
 
-| Condition | Check |
-| :-- | :-- |
-| Namespace | Pod is in `gpu-operator` or `network-operator` namespace |
-| Node assigned | Pod has `spec.nodeName` set (scheduled to a node) |
-| Not healthy | Pod phase is NOT `Running` and NOT `Succeeded` |
-| Time threshold | Pod has been in this state for more than 30 minutes |
+| Condition       | Check                                                     |
+|:----------------|:----------------------------------------------------------|
+| Namespace       | Pod is in `gpu-operator` or `network-operator` namespace  |
+| DaemonSet owned | Pod has a DaemonSet owner reference                       |
+| Node assigned   | Pod has `spec.nodeName` set (scheduled to a node)         |
+| Not healthy     | Pod phase is NOT `Running` and NOT `Succeeded`            |
+| Time threshold  | Pod has been in this state for more than 30 minutes       |
+
+> **Note:** Only DaemonSet pods are monitored. Pods owned by ReplicaSets, Deployments, Jobs, or standalone pods are not monitored by these policies. This is because DaemonSet pods are the critical infrastructure components that affect GPU node health.
 
 ### What This Catches
 
-| Stuck State | Detected? |
-| :-- | :-- |
-| Stuck in init containers | Yes (after threshold) |
-| `Pending` (scheduling/resource issues) | Yes (after threshold) |
-| `CrashLoopBackOff` | Yes (after threshold) |
-| `ImagePullBackOff` / `ErrImagePull` | Yes (after threshold) |
-| `Failed` phase | Yes (after threshold) |
-| Normal initialization (< threshold) | No (grace period) |
-| `Running` | No (healthy) |
-| `Succeeded` | No (completed successfully) |
+| Stuck State                              | Detected?                |
+|:-----------------------------------------|:-------------------------|
+| Stuck in init containers                 | Yes (after threshold)    |
+| `Pending` (scheduling/resource issues)   | Yes (after threshold)    |
+| `CrashLoopBackOff`                       | Yes (after threshold)    |
+| `ImagePullBackOff` / `ErrImagePull`      | Yes (after threshold)    |
+| `Failed` phase                           | Yes (after threshold)    |
+| Normal initialization (< threshold)      | No (grace period)        |
+| `Running`                                | No (healthy)             |
+| `Succeeded`                              | No (completed successfully) |
 
-## Owner-Level Tracking Behavior
+## Pod Tracking Behavior
 
-When `tracking.level: owner` is configured, the kubernetes-object-monitor tracks pods by their owning DaemonSet rather than by individual pod name. This provides several benefits:
+The kubernetes-object-monitor tracks each pod individually by name. This simple approach provides clear and predictable behavior:
 
-### Which Pods Are Tracked?
+### Scenario: Pod Becomes Unhealthy
 
-| Pod Owner | Tracked with `tracking.level: owner`? | Reason |
-| :-- | :-- | :-- |
-| DaemonSet | **Yes** | Replacements always appear on the same node |
-| ReplicaSet/Deployment | **No** (silently skipped) | Replacements can be scheduled on any node |
-| StatefulSet | **No** (silently skipped) | Replacements may go to different nodes |
-| Job | **No** (silently skipped) | May not create replacement pods |
-| No owner (standalone pod) | **No** (silently skipped) | No controller to create replacements |
+1. **Pod enters unhealthy state** (e.g., CrashLoopBackOff) → Node is cordoned after threshold
+2. **Pod becomes healthy** (Running) → Node is uncordoned
 
-> **Note:** When a pod is skipped due to having a non-DaemonSet owner, a debug log is emitted but no health event is published. This is intentional behavior.
+### Scenario: Pod Deletion
 
-### Scenario: Pod Deletion During Troubleshooting
+1. **Pod fails** → Node is cordoned
+2. **Admin deletes the pod** → Node is **uncordoned**
+3. **Replacement pod is created** → If unhealthy, node is re-cordoned after threshold
 
-1. **DaemonSet pod fails** → Node is cordoned
-2. **Admin deletes the pod** (e.g., `kubectl delete pod`) → Node **stays cordoned**
-3. **DaemonSet creates replacement pod** → If replacement is healthy, node is uncordoned
-4. **If replacement also fails** → Node remains cordoned
+### Scenario: Multiple Unhealthy Pods
 
-### Scenario: DaemonSet Deletion
+1. **Pod A fails** → Node is cordoned
+2. **Pod B also fails** → Both tracked in annotation
+3. **Pod A becomes healthy** → Node **stays cordoned** (Pod B still unhealthy)
+4. **Pod B becomes healthy** → Node is uncordoned
 
-1. **DaemonSet pod fails** → Node is cordoned
-2. **Admin deletes the DaemonSet** → Node is **immediately uncordoned** (owner no longer exists)
+### State Key Format
 
-### Scenario: DaemonSet No Longer Targets Node
+The monitor uses a simple state key format: `policyName/namespace/podName`
 
-1. **DaemonSet pod fails** → Node is cordoned
-2. **Admin updates DaemonSet nodeSelector** to exclude this node → Node is **uncordoned** (owner no longer targets this node)
-
-### Tracking Levels
-
-| Level | State Key Format | Use Case |
-|-------|------------------|----------|
-| `resource` (default) | `policyName/namespace/resourceName` | General resources, any pod type |
-| `owner` | `policyName/namespace/ownerKind/ownerName/nodeName` | **DaemonSet pods only** - replacement tracking |
-
-> **Warning:** If you use `tracking.level: owner` with a policy that matches non-DaemonSet pods (e.g., Deployment pods), those pods will be **silently ignored**. Use `tracking.level: resource` (or omit the tracking config) if you need to monitor non-DaemonSet pods.
+This ensures each pod is tracked independently, and the node is only uncordoned when all tracked pods are healthy or deleted.
 
 ## Configuration Options
 
@@ -244,32 +222,25 @@ If you receive these events, investigate the pod status:
     kubectl describe node <node-name>
     ```
 
-### Owner-Level Tracking Issues
+### Common Issues
+
 
 #### Problem: Pods are not being monitored (no health events)
 
-If you're using `tracking.level: owner` but not seeing health events for certain pods:
-
-1. **Check if the pod has a DaemonSet owner:**
+1. **Check if the pod matches the policy predicate:**
    ```bash
-   kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.metadata.ownerReferences[*].kind}'
+   kubectl get pod <pod-name> -n <namespace> -o yaml
    ```
-   - If the output is `ReplicaSet`, `Job`, or empty, the pod will be **skipped** with owner-level tracking
-   - Only pods with `DaemonSet` owner are tracked
+   Verify the pod is in the correct namespace and meets all predicate conditions.
 
-2. **Check kubernetes-object-monitor logs for skip messages:**
+2. **Check kubernetes-object-monitor logs:**
    ```bash
-   kubectl logs -n nvsentinel deployment/kubernetes-object-monitor | grep -i "skipping"
+   kubectl logs -n nvsentinel deployment/kubernetes-object-monitor
    ```
-   You may see messages like:
-   - `Skipping resource without controller owner for owner-level tracking`
-   - `Skipping resource with non-DaemonSet owner for owner-level tracking`
 
-3. **Solution:** If you need to monitor non-DaemonSet pods, either:
-   - Remove the `tracking` section from your policy (defaults to resource-level tracking)
-   - Explicitly set `tracking.level: resource`
+3. **Verify the policy is enabled in your configuration.**
 
-#### Problem: Node stays cordoned after DaemonSet is healthy
+#### Problem: Node stays cordoned after pod is healthy
 
 1. **Check if the DaemonSet still targets the node:**
    ```bash

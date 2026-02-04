@@ -42,11 +42,6 @@ data:
         expression = {{ .nodeAssociation.expression | quote }}
       {{- end }}
       
-      {{- if .tracking }}
-      [policies.tracking]
-        level = {{ .tracking.level | quote }}
-      {{- end }}
-      
       [policies.healthEvent]
         componentClass = {{ .healthEvent.componentClass | quote }}
         isFatal = {{ .healthEvent.isFatal }}

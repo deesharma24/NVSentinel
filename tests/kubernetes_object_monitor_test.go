@@ -333,32 +333,32 @@ func TestKubernetesObjectMonitorWithRuleOverride(t *testing.T) {
 	testEnv.Test(t, feature.Feature())
 }
 
-// daemonSetOwnerTestContext holds context for DaemonSet owner-level tracking tests
-type daemonSetOwnerTestContext struct {
+// daemonSetTestContext holds context for DaemonSet pod health tests
+type daemonSetTestContext struct {
 	NodeName       string
 	DaemonSetName  string
 	DaemonSetName2 string // For multiple DaemonSet tests
 	Namespace      string
 }
 
-// TestKubernetesObjectMonitorDaemonSetOwnerTracking is a comprehensive test for owner-level
-// tracking of DaemonSet pods. It tests multiple scenarios in a single test to minimize
-// the total test time (only one 2m15s policy timeout wait).
+// TestKubernetesObjectMonitorDaemonSetPodHealth tests DaemonSet pod health monitoring.
+// With the simple approach:
+// - Pod becomes unhealthy → node is cordoned
+// - Pod becomes healthy → node is uncordoned
+// - Pod is deleted → node is uncordoned (replacement pod will re-cordon if unhealthy)
 //
 // Scenarios tested:
 // 1. Multiple DaemonSet failures on same node - both tracked separately
-// 2. Pod deletion keeps node cordoned (waiting for replacement)
-// 3. First DaemonSet recovery does NOT uncordon (second still failing)
-// 4. Second DaemonSet recovery uncordons node (all resolved)
-// 5. DaemonSet deletion uncordons node immediately
-//
-// Total test time: ~5 minutes (2m15s wait + verification steps)
-func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
-	feature := features.New("Kubernetes Object Monitor - DaemonSet Owner-Level Tracking").
+// 2. First DaemonSet recovery does NOT uncordon (second still failing)
+// 3. Second DaemonSet recovery uncordons node (all resolved)
+// 4. DaemonSet deletion uncordons node (pod deleted, no replacement)
+// 5. Pod deletion with replacement that stays unhealthy → re-cordon cycle
+func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
+	feature := features.New("Kubernetes Object Monitor - DaemonSet Pod Health").
 		WithLabel("suite", "kubernetes-object-monitor").
-		WithLabel("component", "owner-tracking")
+		WithLabel("component", "pod-health")
 
-	var testCtx *daemonSetOwnerTestContext
+	var testCtx *daemonSetTestContext
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
@@ -392,10 +392,10 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		err = helpers.CreateNamespace(ctx, client, gpuOperatorNamespace)
 		require.NoError(t, err, "failed to create namespace %s", gpuOperatorNamespace)
 
-		testCtx = &daemonSetOwnerTestContext{
+		testCtx = &daemonSetTestContext{
 			NodeName:       testNodeName,
-			DaemonSetName:  "test-ds-owner-1",
-			DaemonSetName2: "test-ds-owner-2",
+			DaemonSetName:  "test-ds-health-1",
+			DaemonSetName2: "test-ds-health-2",
 			Namespace:      gpuOperatorNamespace,
 		}
 
@@ -441,16 +441,16 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		return ctx
 	})
 
-	feature.Assess("Both DaemonSets tracked in annotation and node cordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Both pods tracked in annotation and node cordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Verify annotation contains BOTH DaemonSets
-		t.Log("Verifying both DaemonSets appear in annotation")
+		// Verify annotation contains both pods
+		t.Log("Verifying both pods appear in annotation")
 		require.Eventually(t, func() bool {
-			has1 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("Annotation contains DS1=%v, DS2=%v", has1, has2)
+			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
+			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
+			t.Logf("Annotation contains DS1 pod=%v, DS2 pod=%v", has1, has2)
 			return has1 && has2
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
@@ -459,47 +459,7 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 			ExpectCordoned:   true,
 			ExpectAnnotation: true,
 		})
-		t.Log("Node correctly cordoned with both DaemonSet failures tracked")
-
-		return ctx
-	})
-
-	feature.Assess("Pod deletion keeps node cordoned (owner-level tracking)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		// Get current pod name for DS1
-		pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName)
-		require.NoError(t, err)
-		require.NotEmpty(t, pods, "DaemonSet should have at least one pod")
-		oldPodName := pods[0].Name
-
-		// Delete the pod - DaemonSet controller will create a replacement
-		t.Logf("Deleting DaemonSet pod %s to test owner-level tracking", oldPodName)
-		err = helpers.DeletePod(ctx, t, client, testCtx.Namespace, oldPodName, true)
-		require.NoError(t, err)
-
-		// Wait for replacement pod to be created
-		t.Log("Waiting for replacement pod")
-		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName)
-			if err != nil || len(pods) == 0 {
-				return false
-			}
-			if pods[0].Name != oldPodName {
-				t.Logf("Found replacement pod: %s", pods[0].Name)
-				return true
-			}
-			return false
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-
-		// Node should STILL be cordoned (owner-level tracking prevents premature uncordon)
-		time.Sleep(5 * time.Second)
-		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
-		})
-		t.Log("Node correctly remains cordoned after pod deletion (owner-level tracking working)")
+		t.Log("Node correctly cordoned with both pod failures tracked")
 
 		return ctx
 	})
@@ -526,11 +486,11 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// Wait for first DaemonSet to be removed from annotation
+		// Wait for first DaemonSet pod to be removed from annotation
 		require.Eventually(t, func() bool {
-			has1 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("After DS1 recovery: DS1=%v, DS2=%v", has1, has2)
+			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
+			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
+			t.Logf("After DS1 recovery: DS1 pod=%v, DS2 pod=%v", has1, has2)
 			return !has1 && has2
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
@@ -569,9 +529,9 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 
 		// Wait for annotation to be cleared
 		require.Eventually(t, func() bool {
-			has1 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("After DS2 recovery: DS1=%v, DS2=%v", has1, has2)
+			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
+			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
+			t.Logf("After DS2 recovery: DS1 pod=%v, DS2 pod=%v", has1, has2)
 			return !has1 && !has2
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
@@ -583,45 +543,120 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		return ctx
 	})
 
-	feature.Assess("DaemonSet deletion uncordons node immediately", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("DaemonSet deletion uncordons node (no replacement pod)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Create a new failing DaemonSet for deletion test
+		// Create a new failing DaemonSet
 		dsName := "test-ds-deletion"
 		ds := createTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s for deletion test", dsName)
 
-		// Wait for pod to be created and in pending state
+		// Wait for pod to be created
 		require.Eventually(t, func() bool {
 			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
 			return err == nil && len(pods) > 0
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// Wait for policy timeout (need to wait again for this new DaemonSet)
-		t.Log("Waiting for policy timeout for deletion test")
+		// Wait for policy timeout
+		t.Log("Waiting for policy timeout")
 		time.Sleep(policyTimeoutWait)
 
 		// Verify node is cordoned
 		require.Eventually(t, func() bool {
-			return checkDaemonSetInAnnotation(ctx, t, client, testCtx.NodeName, dsName)
+			return checkPodInAnnotation(ctx, t, client, testCtx.NodeName, dsName)
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
 			ExpectCordoned:   true,
 			ExpectAnnotation: true,
 		})
+		t.Log("Node cordoned due to unhealthy DaemonSet pod")
 
-		// Delete the DaemonSet
-		t.Log("Deleting DaemonSet to test immediate uncordon")
+		// Delete the DaemonSet - this deletes the pod and no replacement will come
+		t.Log("Deleting DaemonSet (pod will be deleted, no replacement)")
 		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
 
-		// Verify node is uncordoned after DaemonSet deletion
+		// Verify node is uncordoned after pod deletion
 		t.Log("Waiting for node to be uncordoned after DaemonSet deletion")
 		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
-		t.Log("Node correctly uncordoned after DaemonSet was deleted")
+		t.Log("Node correctly uncordoned - pod deleted, no replacement expected")
+
+		return ctx
+	})
+
+	feature.Assess("Pod deletion with unhealthy replacement re-cordons node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		// Create a failing DaemonSet
+		dsName := "test-ds-cycle"
+		ds := createTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+		err = client.Resources().Create(ctx, ds)
+		require.NoError(t, err)
+		t.Logf("Created DaemonSet %s for cycle test", dsName)
+
+		// Wait for pod to be created
+		var originalPodName string
+		require.Eventually(t, func() bool {
+			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
+			if err == nil && len(pods) > 0 {
+				originalPodName = pods[0].Name
+				return true
+			}
+			return false
+		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
+		t.Logf("Original pod created: %s", originalPodName)
+
+		// Wait for policy timeout - node gets cordoned
+		t.Log("Waiting for policy timeout")
+		time.Sleep(policyTimeoutWait)
+
+		// Verify node is cordoned
+		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
+			ExpectCordoned:   true,
+			ExpectAnnotation: true,
+		})
+		t.Log("Node cordoned due to unhealthy pod")
+
+		// Delete the pod manually (DaemonSet will create a replacement)
+		t.Logf("Deleting pod %s manually", originalPodName)
+		err = helpers.DeletePod(ctx, t, client, testCtx.Namespace, originalPodName, true)
+		require.NoError(t, err)
+
+		// Node should be uncordoned after pod deletion
+		t.Log("Waiting for node to be uncordoned after pod deletion")
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
+		t.Log("Node uncordoned after pod deletion")
+
+		// Wait for replacement pod to be created by DaemonSet controller
+		var replacementPodName string
+		require.Eventually(t, func() bool {
+			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
+			if err == nil && len(pods) > 0 && pods[0].Name != originalPodName {
+				replacementPodName = pods[0].Name
+				t.Logf("Replacement pod created: %s", replacementPodName)
+				return true
+			}
+			return false
+		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
+
+		// The replacement pod will also be unhealthy (same init blocker)
+		// Wait for policy timeout again - node should be re-cordoned
+		t.Log("Waiting for policy timeout for replacement pod")
+		time.Sleep(policyTimeoutWait)
+
+		// Verify node is cordoned again due to unhealthy replacement pod
+		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
+			ExpectCordoned:   true,
+			ExpectAnnotation: true,
+		})
+		t.Log("Node correctly re-cordoned due to unhealthy replacement pod - cycle behavior verified")
+
+		// Clean up
+		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
 
 		return ctx
 	})
@@ -634,7 +669,6 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 		t.Log("Cleaning up test DaemonSets")
 		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName)
 		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName2)
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, "test-ds-deletion")
 
 		// Ensure node is uncordoned
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
@@ -653,8 +687,8 @@ func TestKubernetesObjectMonitorDaemonSetOwnerTracking(t *testing.T) {
 	testEnv.Test(t, feature.Feature())
 }
 
-// checkDaemonSetInAnnotation checks if a DaemonSet is tracked in the node annotation
-func checkDaemonSetInAnnotation(ctx context.Context, t *testing.T, client klient.Client, nodeName, dsName string) bool {
+// checkPodInAnnotation checks if a pod from a DaemonSet is tracked in the node annotation
+func checkPodInAnnotation(ctx context.Context, t *testing.T, client klient.Client, nodeName, dsName string) bool {
 	node, err := helpers.GetNodeByName(ctx, client, nodeName)
 	if err != nil {
 		return false
@@ -670,21 +704,19 @@ func checkDaemonSetInAnnotation(ctx context.Context, t *testing.T, client klient
 		return false
 	}
 
-	// Look for owner-level tracking key containing the DaemonSet name
+	// Look for pod tracking key containing the DaemonSet name (pod name starts with DS name)
 	for key := range annotationMap {
-		if strings.Contains(key, "DaemonSet/"+dsName+"/") {
+		if strings.Contains(key, dsName) {
 			return true
 		}
 	}
 	return false
 }
 
-// createTestDaemonSetWithUniqueSelector creates a DaemonSet with a unique selector
-// This is needed when running multiple DaemonSets in the same namespace.
-//
-// When shouldFail=true, the pod uses an init container that exits with failure,
-// causing the pod to stay in CrashLoopBackOff. This matches the policy condition
-// which checks for pods NOT in Running/Succeeded phase and triggers after 2 minutes.
+// createTestDaemonSetWithUniqueSelector creates a DaemonSet with a unique selector.
+// When shouldFail=true, the pod includes an init container that sleeps indefinitely,
+// blocking the pod in Pending/Init state (Init:0/1). This triggers the policy condition
+// which checks for pods NOT in Running/Succeeded phase (resource.status.phase != 'Running').
 func createTestDaemonSetWithUniqueSelector(name, namespace, nodeName string, shouldFail bool) *appsv1.DaemonSet {
 	// Use the DaemonSet name as part of the selector to make it unique
 	selectorLabel := "app-" + name
@@ -768,7 +800,7 @@ func listDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsN
 	return dsPods, nil
 }
 
-// cleanupDaemonSet deletes a DaemonSet and waits for it and its pods to be fully deleted
+// cleanupDaemonSet deletes a DaemonSet and waits for it and its pods to be fully deleted.
 func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, namespace, name string) {
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -776,15 +808,31 @@ func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, n
 			Namespace: namespace,
 		},
 	}
+
+	// Check if DaemonSet exists first - skip cleanup if not found
+	err := client.Resources(namespace).Get(ctx, name, namespace, ds)
+	if apierrors.IsNotFound(err) {
+		t.Logf("DaemonSet %s/%s does not exist, skipping cleanup", namespace, name)
+		return
+	}
+	if err != nil {
+		t.Logf("Warning: error checking DaemonSet existence: %v", err)
+	}
+
+	// Delete the DaemonSet
 	if err := client.Resources().Delete(ctx, ds); err != nil {
-		t.Logf("Note: DaemonSet deletion returned error (may be expected if not found): %v", err)
+		if apierrors.IsNotFound(err) {
+			t.Logf("DaemonSet %s/%s already deleted", namespace, name)
+			return
+		}
+		t.Logf("Note: DaemonSet deletion returned error: %v", err)
 	}
 
 	// Wait for pods to be deleted
 	require.Eventually(t, func() bool {
 		pods, err := listDaemonSetPods(ctx, client, namespace, name)
 		return err == nil && len(pods) == 0
-	}, 2*time.Minute, 5*time.Second)
+	}, 5*time.Minute, 5*time.Second, "timed out waiting for pods of DaemonSet %s/%s to be deleted", namespace, name)
 
 	// Wait for DaemonSet to be fully deleted
 	require.Eventually(t, func() bool {
@@ -798,7 +846,7 @@ func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, n
 		// Transient error - log and retry
 		t.Logf("Note: transient error checking DaemonSet deletion: %v", err)
 		return false
-	}, 30*time.Second, 1*time.Second)
+	}, 30*time.Second, 1*time.Second, "timed out waiting for DaemonSet %s/%s to be fully deleted", namespace, name)
 }
 
 // updateDaemonSetToHealthy updates a DaemonSet to remove the blocking init container,

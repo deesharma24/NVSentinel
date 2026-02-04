@@ -3799,13 +3799,8 @@ kubernetes-object-monitor:
           - NODE_TEST_CONDITION_NOT_READY
 
     # This policy monitors DaemonSet pods in the gpu-operator namespace and publishes
-    # fatal health events when pods are not in Running or Succeeded state
+    # fatal health events when pods are not in Running or Succeeded state.
     #
-    # Uses owner-level tracking: when a pod is deleted which is owned by a DaemonSet, the node stays cordoned
-    # until either:
-    # - A healthy replacement pod from the same DaemonSet appears
-    # - The owner (DaemonSet) is deleted
-    # - The owner no longer targets this node (nodeSelector/taint change)
     - name: gpu-operator-pod-health
       enabled: true
       resource:
@@ -3815,7 +3810,7 @@ kubernetes-object-monitor:
       predicate:
         # Trigger event if:
         # 1. Pod is in gpu-operator namespace
-        # 2. Pod is owned by a DaemonSet (required for owner-level tracking)
+        # 2. Pod is owned by a DaemonSet (filters to only monitor DaemonSet pods)
         # 3. Pod has been assigned to a node (nodeName is set)
         # 4. Pod is NOT in Running or Succeeded state
         expression: |
@@ -3829,11 +3824,6 @@ kubernetes-object-monitor:
           now - timestamp(resource.status.startTime) > duration('30s')
       nodeAssociation:
         expression: resource.spec.nodeName
-      # Track by owner (DaemonSet) instead of individual pod name
-      # This ensures node stays cordoned when a pod is deleted until a healthy
-      # replacement pod is running
-      tracking:
-        level: owner
       healthEvent:
         componentClass: Software
         isFatal: true
