@@ -20,7 +20,6 @@ package tests
 import (
 	"context"
 	"testing"
-	"time"
 
 	"tests/helpers"
 
@@ -39,11 +38,6 @@ const (
 	testConditionType        = "TestCondition"
 	gpuOperatorNamespace     = "gpu-operator"
 	gpuOperatorPodPolicyName = "gpu-operator-pod-health"
-
-	// policyTimeoutWait is the maximum time to wait for policy to take effect.
-	// Used as timeout for polling - tests complete as soon as condition is met.
-	// Calculated as: policy delay (10s) + resync period (5s) + buffer (25s)
-	policyTimeoutWait = 40 * time.Second
 )
 
 func TestKubernetesObjectMonitor(t *testing.T) {
@@ -55,18 +49,8 @@ func TestKubernetesObjectMonitor(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		nodeList := &v1.NodeList{}
-		err = client.Resources().List(ctx, nodeList)
-		require.NoError(t, err)
-
-		var testNodeName string
-		for _, node := range nodeList.Items {
-			if node.Labels["type"] != "kwok" {
-				testNodeName = node.Name
-				break
-			}
-		}
-		require.NotEmpty(t, testNodeName, "no worker node found in cluster")
+		testNodeName, err := helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
 		t.Logf("Using test node: %s", testNodeName)
 
 		return context.WithValue(ctx, k8sMonitorKeyNodeName, testNodeName)
@@ -149,19 +133,8 @@ func TestKubernetesObjectMonitorWithStoreOnlyStrategy(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Find the test node first
-		nodeList := &v1.NodeList{}
-		err = client.Resources().List(ctx, nodeList)
-		require.NoError(t, err)
-
-		var testNodeName string
-		for _, node := range nodeList.Items {
-			if node.Labels["type"] != "kwok" {
-				testNodeName = node.Name
-				break
-			}
-		}
-		require.NotEmpty(t, testNodeName, "no worker node found in cluster")
+		testNodeName, err := helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
 		t.Logf("Using test node: %s", testNodeName)
 
 		err = helpers.DeleteExistingNodeEvents(ctx, t, client, testNodeName, "node-test-condition", "node-test-conditionIsNotHealthy")
@@ -243,19 +216,8 @@ func TestKubernetesObjectMonitorWithRuleOverride(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Find the test node first
-		nodeList := &v1.NodeList{}
-		err = client.Resources().List(ctx, nodeList)
-		require.NoError(t, err)
-
-		var testNodeName string
-		for _, node := range nodeList.Items {
-			if node.Labels["type"] != "kwok" {
-				testNodeName = node.Name
-				break
-			}
-		}
-		require.NotEmpty(t, testNodeName, "no worker node found in cluster")
+		testNodeName, err := helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
 		t.Logf("Using test node: %s", testNodeName)
 
 		err = helpers.DeleteExistingNodeEvents(ctx, t, client, testNodeName, "node-test-condition", "node-test-conditionIsNotHealthy")
@@ -352,28 +314,8 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Find a real worker node (non-kwok, non-control-plane)
-		// We need a real node that can actually run pods (not kwok simulated nodes)
-		nodeList := &v1.NodeList{}
-		err = client.Resources().List(ctx, nodeList)
-		require.NoError(t, err)
-
-		var testNodeName string
-		for _, node := range nodeList.Items {
-			// Skip kwok simulated nodes - they can't run real pods
-			if node.Labels["type"] == "kwok" {
-				continue
-			}
-			// Skip control-plane nodes
-			_, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
-			if isControlPlane {
-				continue
-			}
-			// Found a real worker node
-			testNodeName = node.Name
-			break
-		}
-		require.NotEmpty(t, testNodeName, "no real worker node found in cluster")
+		testNodeName, err := helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
 		t.Logf("Using test worker node: %s", testNodeName)
 
 		// Ensure gpu-operator namespace exists
@@ -397,7 +339,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		// --- Phase 1: Create two failing DaemonSets ---
 		t.Log("=== Phase 1: Creating two failing DaemonSets ===")
 		for _, dsName := range testCtx.DaemonSetNames {
-			ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
+			ds := helpers.BuildTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 			err = client.Resources().Create(ctx, ds)
 			require.NoError(t, err)
 			t.Logf("Created DaemonSet %s with blocking init container", dsName)
@@ -417,7 +359,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 
 		// Wait for node to be cordoned
 		t.Log("Waiting for node to be cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: true,
 			AnnotationChecks: []helpers.AnnotationCheck{
@@ -434,17 +376,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		err = helpers.UpdateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[0])
 		require.NoError(t, err)
 
-		require.Eventually(t, func() bool {
-			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[0])
-			if err != nil || len(pods) == 0 {
-				return false
-			}
-			if pods[0].Status.Phase == v1.PodRunning {
-				t.Logf("First DaemonSet pod %s is now Running", pods[0].Name)
-				return true
-			}
-			return false
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
+		helpers.WaitForDaemonSetPodRunning(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetNames[0], testCtx.NodeName)
 
 		// Node should STILL be cordoned
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
@@ -462,17 +394,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		err = helpers.UpdateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[1])
 		require.NoError(t, err)
 
-		require.Eventually(t, func() bool {
-			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[1])
-			if err != nil || len(pods) == 0 {
-				return false
-			}
-			if pods[0].Status.Phase == v1.PodRunning {
-				t.Logf("Second DaemonSet pod %s is now Running", pods[0].Name)
-				return true
-			}
-			return false
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
+		helpers.WaitForDaemonSetPodRunning(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetNames[1], testCtx.NodeName)
 
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: false,
@@ -492,7 +414,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 
 		t.Log("=== Phase 1: DaemonSet deletion uncordons node ===")
 		dsName := "test-ds-init-deletion"
-		ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
+		ds := helpers.BuildTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s", dsName)
@@ -503,7 +425,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
 		t.Log("Waiting for node to be cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
 
 		t.Log("Deleting DaemonSet...")
 		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
@@ -513,7 +435,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		// --- Phase 2: Pod deletion with unhealthy replacement re-cordons ---
 		t.Log("=== Phase 2: Pod deletion with unhealthy replacement ===")
 		dsName = "test-ds-init-cycle"
-		ds = helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
+		ds = helpers.BuildTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s", dsName)
@@ -529,7 +451,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
 		t.Log("Waiting for node to be cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
 
 		t.Logf("Deleting pod %s manually", originalPodName)
 		err = helpers.DeletePod(ctx, t, client, testCtx.Namespace, originalPodName, true)
@@ -548,7 +470,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
 		t.Log("Waiting for node to be re-cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
 		t.Log("SUCCESS: Node re-cordoned due to unhealthy replacement pod")
 
 		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
@@ -565,19 +487,19 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 
 		// --- Phase 1: CrashLoopBackOff detection ---
 		t.Log("=== Phase 1: Init container CrashLoopBackOff detection ===")
-		ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitCrashLoop)
+		ds := helpers.BuildTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitCrashLoop)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s with crashing init container", dsName)
 
 		t.Log("Waiting for init container to enter CrashLoopBackOff...")
-		pod := helpers.WaitForInitContainerCrashLoopBackOff(ctx, t, client, testCtx.Namespace, dsName)
+		pod := helpers.WaitForCrashLoopBackOff(ctx, t, client, testCtx.Namespace, dsName, true)
 		require.NotNil(t, pod, "pod init container should be in CrashLoopBackOff")
 		t.Logf("Pod %s: phase=%s (Pending because init container crashing)", pod.Name, pod.Status.Phase)
 		require.Equal(t, v1.PodPending, pod.Status.Phase)
 
 		t.Log("Waiting for node to be cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, true)
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: true,
 			AnnotationChecks: []helpers.AnnotationCheck{
@@ -596,7 +518,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		t.Log("New pod is Running (init container completed successfully)")
 
 		t.Log("Waiting for node to be uncordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, false, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: false,
 			AnnotationChecks: []helpers.AnnotationCheck{
@@ -659,23 +581,8 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Find a real worker node (non-kwok, non-control-plane)
-		nodeList := &v1.NodeList{}
-		err = client.Resources().List(ctx, nodeList)
-		require.NoError(t, err)
-
-		for _, node := range nodeList.Items {
-			if node.Labels["type"] == "kwok" {
-				continue
-			}
-			_, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
-			if isControlPlane {
-				continue
-			}
-			testNodeName = node.Name
-			break
-		}
-		require.NotEmpty(t, testNodeName, "no real worker node found in cluster")
+		testNodeName, err = helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
 		t.Logf("Using test worker node: %s", testNodeName)
 
 		// Ensure gpu-operator namespace exists
@@ -692,13 +599,13 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 
 		// --- Phase 1: CrashLoopBackOff detection ---
 		t.Log("=== Phase 1: Main container CrashLoopBackOff detection ===")
-		ds := helpers.CreateTestDaemonSet(dsName, gpuOperatorNamespace, testNodeName, helpers.DaemonSetMainCrashLoop)
+		ds := helpers.BuildTestDaemonSet(dsName, gpuOperatorNamespace, testNodeName, helpers.DaemonSetMainCrashLoop)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s with crashing container", dsName)
 
 		t.Log("Waiting for pod to enter CrashLoopBackOff state...")
-		pod := helpers.WaitForPodCrashLoopBackOff(ctx, t, client, gpuOperatorNamespace, dsName)
+		pod := helpers.WaitForCrashLoopBackOff(ctx, t, client, gpuOperatorNamespace, dsName, false)
 		require.NotNil(t, pod, "pod should be in CrashLoopBackOff")
 
 		// Verify pod phase is "Running" - this is why we need containerStatuses check
@@ -714,7 +621,7 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 		}
 
 		t.Log("Waiting for node to be cordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testNodeName, true, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testNodeName}, true)
 		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: true,
 			AnnotationChecks: []helpers.AnnotationCheck{
@@ -749,7 +656,7 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 		}
 
 		t.Log("Waiting for node to be uncordoned...")
-		helpers.WaitForQuarantineState(ctx, t, client, testNodeName, false, policyTimeoutWait)
+		helpers.WaitForNodesCordonState(ctx, t, client, []string{testNodeName}, false)
 		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
 			ExpectCordoned: false,
 			AnnotationChecks: []helpers.AnnotationCheck{
