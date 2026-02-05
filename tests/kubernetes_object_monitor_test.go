@@ -397,7 +397,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		// --- Phase 1: Create two failing DaemonSets ---
 		t.Log("=== Phase 1: Creating two failing DaemonSets ===")
 		for _, dsName := range testCtx.DaemonSetNames {
-			ds := helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+			ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 			err = client.Resources().Create(ctx, ds)
 			require.NoError(t, err)
 			t.Logf("Created DaemonSet %s with blocking init container", dsName)
@@ -492,7 +492,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 
 		t.Log("=== Phase 1: DaemonSet deletion uncordons node ===")
 		dsName := "test-ds-init-deletion"
-		ds := helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+		ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s", dsName)
@@ -513,7 +513,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 		// --- Phase 2: Pod deletion with unhealthy replacement re-cordons ---
 		t.Log("=== Phase 2: Pod deletion with unhealthy replacement ===")
 		dsName = "test-ds-init-cycle"
-		ds = helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+		ds = helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitBlocking)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s", dsName)
@@ -565,7 +565,7 @@ func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
 
 		// --- Phase 1: CrashLoopBackOff detection ---
 		t.Log("=== Phase 1: Init container CrashLoopBackOff detection ===")
-		ds := helpers.CreateTestDaemonSetWithInitCrashLoop(dsName, testCtx.Namespace, testCtx.NodeName)
+		ds := helpers.CreateTestDaemonSet(dsName, testCtx.Namespace, testCtx.NodeName, helpers.DaemonSetInitCrashLoop)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s with crashing init container", dsName)
@@ -692,7 +692,7 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 
 		// --- Phase 1: CrashLoopBackOff detection ---
 		t.Log("=== Phase 1: Main container CrashLoopBackOff detection ===")
-		ds := helpers.CreateTestDaemonSetWithCrashLoop(dsName, gpuOperatorNamespace, testNodeName)
+		ds := helpers.CreateTestDaemonSet(dsName, gpuOperatorNamespace, testNodeName, helpers.DaemonSetMainCrashLoop)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
 		t.Logf("Created DaemonSet %s with crashing container", dsName)

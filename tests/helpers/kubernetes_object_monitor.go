@@ -204,28 +204,6 @@ func CreateTestDaemonSet(name, namespace, nodeName string, failureType DaemonSet
 	}
 }
 
-// CreateTestDaemonSetWithCrashLoop creates a DaemonSet with a main container that crashes.
-// Shorthand for CreateTestDaemonSet(name, namespace, nodeName, DaemonSetMainCrashLoop).
-func CreateTestDaemonSetWithCrashLoop(name, namespace, nodeName string) *appsv1.DaemonSet {
-	return CreateTestDaemonSet(name, namespace, nodeName, DaemonSetMainCrashLoop)
-}
-
-// CreateTestDaemonSetWithInitCrashLoop creates a DaemonSet with an init container that crashes.
-// Shorthand for CreateTestDaemonSet(name, namespace, nodeName, DaemonSetInitCrashLoop).
-func CreateTestDaemonSetWithInitCrashLoop(name, namespace, nodeName string) *appsv1.DaemonSet {
-	return CreateTestDaemonSet(name, namespace, nodeName, DaemonSetInitCrashLoop)
-}
-
-// CreateTestDaemonSetWithUniqueSelector creates a DaemonSet with optional init blocker.
-// When shouldFail=true, uses DaemonSetInitBlocking; otherwise uses DaemonSetHealthy.
-func CreateTestDaemonSetWithUniqueSelector(name, namespace, nodeName string, shouldFail bool) *appsv1.DaemonSet {
-	if shouldFail {
-		return CreateTestDaemonSet(name, namespace, nodeName, DaemonSetInitBlocking)
-	}
-
-	return CreateTestDaemonSet(name, namespace, nodeName, DaemonSetHealthy)
-}
-
 // ListDaemonSetPods returns all pods owned by the specified DaemonSet.
 func ListDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsName string) ([]v1.Pod, error) {
 	var podList v1.PodList
