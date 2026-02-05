@@ -19,19 +19,13 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
 	"tests/helpers"
 
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
@@ -42,14 +36,14 @@ const (
 	k8sMonitorKeyNodeName     k8sObjectMonitorContextKey = iota
 	k8sMonitorKeyOriginalArgs k8sObjectMonitorContextKey = iota
 
-	annotationKey            = "nvsentinel.nvidia.com/k8s-object-monitor-policy-matches"
 	testConditionType        = "TestCondition"
 	gpuOperatorNamespace     = "gpu-operator"
 	gpuOperatorPodPolicyName = "gpu-operator-pod-health"
 
-	// policyTimeoutWait is the time to wait for policy timeout to elapse.
-	// Calculated as: policy delay (30s) + resync period (30s) + buffer (10s)
-	policyTimeoutWait = 70 * time.Second
+	// policyTimeoutWait is the maximum time to wait for policy to take effect.
+	// Used as timeout for polling - tests complete as soon as condition is met.
+	// Calculated as: policy delay (10s) + resync period (5s) + buffer (25s)
+	policyTimeoutWait = 40 * time.Second
 )
 
 func TestKubernetesObjectMonitor(t *testing.T) {
@@ -95,7 +89,7 @@ func TestKubernetesObjectMonitor(t *testing.T) {
 				return false
 			}
 
-			annotation, exists := node.Annotations[annotationKey]
+			annotation, exists := node.Annotations[helpers.K8sObjectMonitorAnnotationKey]
 			if !exists {
 				return false
 			}
@@ -129,7 +123,7 @@ func TestKubernetesObjectMonitor(t *testing.T) {
 				return false
 			}
 
-			annotation, exists := node.Annotations[annotationKey]
+			annotation, exists := node.Annotations[helpers.K8sObjectMonitorAnnotationKey]
 			if exists && annotation != "" {
 				t.Logf("Annotation still exists: %s", annotation)
 				return false
@@ -206,7 +200,7 @@ func TestKubernetesObjectMonitorWithStoreOnlyStrategy(t *testing.T) {
 				return false
 			}
 
-			annotation, exists := node.Annotations[annotationKey]
+			annotation, exists := node.Annotations[helpers.K8sObjectMonitorAnnotationKey]
 			if !exists {
 				return false
 			}
@@ -300,7 +294,7 @@ func TestKubernetesObjectMonitorWithRuleOverride(t *testing.T) {
 				return false
 			}
 
-			annotation, exists := node.Annotations[annotationKey]
+			annotation, exists := node.Annotations[helpers.K8sObjectMonitorAnnotationKey]
 			if !exists {
 				return false
 			}
@@ -336,27 +330,21 @@ func TestKubernetesObjectMonitorWithRuleOverride(t *testing.T) {
 // daemonSetTestContext holds context for DaemonSet pod health tests
 type daemonSetTestContext struct {
 	NodeName       string
-	DaemonSetName  string
-	DaemonSetName2 string // For multiple DaemonSet tests
+	DaemonSetNames []string
 	Namespace      string
 }
 
 // TestKubernetesObjectMonitorDaemonSetPodHealth tests DaemonSet pod health monitoring.
-// With the simple approach:
-// - Pod becomes unhealthy → node is cordoned
-// - Pod becomes healthy → node is uncordoned
-// - Pod is deleted → node is uncordoned (replacement pod will re-cordon if unhealthy)
-//
-// Scenarios tested:
-// 1. Multiple DaemonSet failures on same node - both tracked separately
-// 2. First DaemonSet recovery does NOT uncordon (second still failing)
-// 3. Second DaemonSet recovery uncordons node (all resolved)
-// 4. DaemonSet deletion uncordons node (pod deleted, no replacement)
-// 5. Pod deletion with replacement that stays unhealthy → re-cordon cycle
-func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
-	feature := features.New("Kubernetes Object Monitor - DaemonSet Pod Health").
+// Scenarios:
+// 1. Init container blocking (sleep) - pod stuck in Pending/Init state
+// 2. Multi-pod tracking - partial recovery keeps node cordoned
+// 3. DaemonSet deletion uncordons node
+// 4. Pod deletion with unhealthy replacement re-cordons node
+// 5. Init container CrashLoopBackOff detection + recovery
+func TestKubernetesObjectMonitorInitContainerFailures(t *testing.T) {
+	feature := features.New("Kubernetes Object Monitor - Init Container Failures").
 		WithLabel("suite", "kubernetes-object-monitor").
-		WithLabel("component", "pod-health")
+		WithLabel("component", "init-container-failures")
 
 	var testCtx *daemonSetTestContext
 
@@ -394,88 +382,60 @@ func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
 
 		testCtx = &daemonSetTestContext{
 			NodeName:       testNodeName,
-			DaemonSetName:  "test-ds-health-1",
-			DaemonSetName2: "test-ds-health-2",
+			DaemonSetNames: []string{"test-ds-init-1", "test-ds-init-2"},
 			Namespace:      gpuOperatorNamespace,
 		}
-
-		// Clean up any leftover resources from previous runs
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName)
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName2)
 
 		return ctx
 	})
 
-	feature.Assess("Create two failing DaemonSets and wait for policy timeout", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	// Consolidated test: Multi-DaemonSet failure, partial recovery, full recovery
+	feature.Assess("Multi-DaemonSet failures with partial and full recovery", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Create BOTH failing DaemonSets at the same time to share the policy timeout wait
-		ds1 := createTestDaemonSetWithUniqueSelector(testCtx.DaemonSetName, testCtx.Namespace, testCtx.NodeName, true)
-		err = client.Resources().Create(ctx, ds1)
-		require.NoError(t, err)
-		t.Logf("Created first DaemonSet %s", testCtx.DaemonSetName)
-
-		ds2 := createTestDaemonSetWithUniqueSelector(testCtx.DaemonSetName2, testCtx.Namespace, testCtx.NodeName, true)
-		err = client.Resources().Create(ctx, ds2)
-		require.NoError(t, err)
-		t.Logf("Created second DaemonSet %s", testCtx.DaemonSetName2)
+		// --- Phase 1: Create two failing DaemonSets ---
+		t.Log("=== Phase 1: Creating two failing DaemonSets ===")
+		for _, dsName := range testCtx.DaemonSetNames {
+			ds := helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+			err = client.Resources().Create(ctx, ds)
+			require.NoError(t, err)
+			t.Logf("Created DaemonSet %s with blocking init container", dsName)
+		}
 
 		// Wait for both pods to be created
-		t.Log("Waiting for DaemonSet pods to be created")
 		require.Eventually(t, func() bool {
-			pods1, _ := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName)
-			pods2, _ := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName2)
+			pods1, _ := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[0])
+			pods2, _ := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[1])
 			if len(pods1) > 0 && len(pods2) > 0 {
-				t.Logf("Both DaemonSet pods created: %s (phase: %s), %s (phase: %s)",
-					pods1[0].Name, pods1[0].Status.Phase,
-					pods2[0].Name, pods2[0].Status.Phase)
+				t.Logf("Both pods created: %s (phase: %s), %s (phase: %s)",
+					pods1[0].Name, pods1[0].Status.Phase, pods2[0].Name, pods2[0].Status.Phase)
 				return true
 			}
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		t.Log("Waiting for policy timeout to elapse (single wait for all DaemonSets)")
-		time.Sleep(policyTimeoutWait)
-
-		return ctx
-	})
-
-	feature.Assess("Both pods tracked in annotation and node cordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		// Verify annotation contains both pods
-		t.Log("Verifying both pods appear in annotation")
-		require.Eventually(t, func() bool {
-			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("Annotation contains DS1 pod=%v, DS2 pod=%v", has1, has2)
-			return has1 && has2
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-
-		// Verify node is cordoned
+		// Wait for node to be cordoned
+		t.Log("Waiting for node to be cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
+			ExpectCordoned: true,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: true},
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: testCtx.DaemonSetNames[0], ShouldExist: true},
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: testCtx.DaemonSetNames[1], ShouldExist: true},
+			},
 		})
-		t.Log("Node correctly cordoned with both pod failures tracked")
+		t.Log("Node cordoned with both pod failures tracked")
 
-		return ctx
-	})
-
-	feature.Assess("First DaemonSet recovery does NOT uncordon node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
+		// --- Phase 2: First DaemonSet recovery (node stays cordoned) ---
+		t.Log("=== Phase 2: First DaemonSet recovery ===")
+		t.Logf("Updating %s to healthy", testCtx.DaemonSetNames[0])
+		err = helpers.UpdateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[0])
 		require.NoError(t, err)
 
-		// Update first DaemonSet to healthy (remove init blocker)
-		t.Logf("Updating first DaemonSet %s to healthy", testCtx.DaemonSetName)
-		err = updateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetName)
-		require.NoError(t, err)
-
-		// Wait for healthy pod to be running
 		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName)
+			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[0])
 			if err != nil || len(pods) == 0 {
 				return false
 			}
@@ -486,37 +446,24 @@ func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// Wait for first DaemonSet pod to be removed from annotation
-		require.Eventually(t, func() bool {
-			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("After DS1 recovery: DS1 pod=%v, DS2 pod=%v", has1, has2)
-			return !has1 && has2
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-
-		// CRITICAL: Node should STILL be cordoned because DS2 is still unhealthy
-		time.Sleep(5 * time.Second)
+		// Node should STILL be cordoned
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
+			ExpectCordoned: true,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: testCtx.DaemonSetNames[0], ShouldExist: false},
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: testCtx.DaemonSetNames[1], ShouldExist: true},
+			},
 		})
-		t.Log("Node correctly remains cordoned - second DaemonSet is still unhealthy")
+		t.Log("Node remains cordoned - second DaemonSet still unhealthy")
 
-		return ctx
-	})
-
-	feature.Assess("Second DaemonSet recovery uncordons node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
+		// --- Phase 3: Full recovery (node uncordoned) ---
+		t.Log("=== Phase 3: Full recovery ===")
+		t.Logf("Updating %s to healthy", testCtx.DaemonSetNames[1])
+		err = helpers.UpdateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[1])
 		require.NoError(t, err)
 
-		// Update second DaemonSet to healthy
-		t.Logf("Updating second DaemonSet %s to healthy", testCtx.DaemonSetName2)
-		err = updateDaemonSetToHealthy(ctx, client, testCtx.Namespace, testCtx.DaemonSetName2)
-		require.NoError(t, err)
-
-		// Wait for healthy pod to be running
 		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetName2)
+			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, testCtx.DaemonSetNames[1])
 			if err != nil || len(pods) == 0 {
 				return false
 			}
@@ -527,136 +474,138 @@ func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// Wait for annotation to be cleared
-		require.Eventually(t, func() bool {
-			has1 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName)
-			has2 := checkPodInAnnotation(ctx, t, client, testCtx.NodeName, testCtx.DaemonSetName2)
-			t.Logf("After DS2 recovery: DS1 pod=%v, DS2 pod=%v", has1, has2)
-			return !has1 && !has2
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-
-		// Verify node is now uncordoned
-		t.Log("Waiting for node to be uncordoned")
-		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
-		t.Log("Node correctly uncordoned after ALL DaemonSet failures resolved")
+		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: false,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: false},
+			},
+		})
+		t.Log("SUCCESS: Node uncordoned after all failures resolved")
 
 		return ctx
 	})
 
-	feature.Assess("DaemonSet deletion uncordons node (no replacement pod)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	// Consolidated test: DaemonSet deletion and pod replacement cycle
+	feature.Assess("DaemonSet deletion and pod replacement cycle", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		// Create a new failing DaemonSet
-		dsName := "test-ds-deletion"
-		ds := createTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+		t.Log("=== Phase 1: DaemonSet deletion uncordons node ===")
+		dsName := "test-ds-init-deletion"
+		ds := helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
-		t.Logf("Created DaemonSet %s for deletion test", dsName)
+		t.Logf("Created DaemonSet %s", dsName)
 
-		// Wait for pod to be created
 		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
+			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
 			return err == nil && len(pods) > 0
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// Wait for policy timeout
-		t.Log("Waiting for policy timeout")
-		time.Sleep(policyTimeoutWait)
+		t.Log("Waiting for node to be cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
 
-		// Verify node is cordoned
-		require.Eventually(t, func() bool {
-			return checkPodInAnnotation(ctx, t, client, testCtx.NodeName, dsName)
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-
-		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
-		})
-		t.Log("Node cordoned due to unhealthy DaemonSet pod")
-
-		// Delete the DaemonSet - this deletes the pod and no replacement will come
-		t.Log("Deleting DaemonSet (pod will be deleted, no replacement)")
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
-
-		// Verify node is uncordoned after pod deletion
-		t.Log("Waiting for node to be uncordoned after DaemonSet deletion")
+		t.Log("Deleting DaemonSet...")
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
 		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
-		t.Log("Node correctly uncordoned - pod deleted, no replacement expected")
+		t.Log("Node uncordoned after DaemonSet deletion")
 
-		return ctx
-	})
-
-	feature.Assess("Pod deletion with unhealthy replacement re-cordons node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		client, err := c.NewClient()
-		require.NoError(t, err)
-
-		// Create a failing DaemonSet
-		dsName := "test-ds-cycle"
-		ds := createTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
+		// --- Phase 2: Pod deletion with unhealthy replacement re-cordons ---
+		t.Log("=== Phase 2: Pod deletion with unhealthy replacement ===")
+		dsName = "test-ds-init-cycle"
+		ds = helpers.CreateTestDaemonSetWithUniqueSelector(dsName, testCtx.Namespace, testCtx.NodeName, true)
 		err = client.Resources().Create(ctx, ds)
 		require.NoError(t, err)
-		t.Logf("Created DaemonSet %s for cycle test", dsName)
+		t.Logf("Created DaemonSet %s", dsName)
 
-		// Wait for pod to be created
 		var originalPodName string
 		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
+			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
 			if err == nil && len(pods) > 0 {
 				originalPodName = pods[0].Name
 				return true
 			}
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
-		t.Logf("Original pod created: %s", originalPodName)
 
-		// Wait for policy timeout - node gets cordoned
-		t.Log("Waiting for policy timeout")
-		time.Sleep(policyTimeoutWait)
+		t.Log("Waiting for node to be cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
 
-		// Verify node is cordoned
-		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
-		})
-		t.Log("Node cordoned due to unhealthy pod")
-
-		// Delete the pod manually (DaemonSet will create a replacement)
 		t.Logf("Deleting pod %s manually", originalPodName)
 		err = helpers.DeletePod(ctx, t, client, testCtx.Namespace, originalPodName, true)
 		require.NoError(t, err)
 
-		// Node should be uncordoned after pod deletion
-		t.Log("Waiting for node to be uncordoned after pod deletion")
 		helpers.WaitForNodesCordonState(ctx, t, client, []string{testCtx.NodeName}, false)
 		t.Log("Node uncordoned after pod deletion")
 
-		// Wait for replacement pod to be created by DaemonSet controller
-		var replacementPodName string
 		require.Eventually(t, func() bool {
-			pods, err := listDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
+			pods, err := helpers.ListDaemonSetPods(ctx, client, testCtx.Namespace, dsName)
 			if err == nil && len(pods) > 0 && pods[0].Name != originalPodName {
-				replacementPodName = pods[0].Name
-				t.Logf("Replacement pod created: %s", replacementPodName)
+				t.Logf("Replacement pod created: %s", pods[0].Name)
 				return true
 			}
 			return false
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
 
-		// The replacement pod will also be unhealthy (same init blocker)
-		// Wait for policy timeout again - node should be re-cordoned
-		t.Log("Waiting for policy timeout for replacement pod")
-		time.Sleep(policyTimeoutWait)
+		t.Log("Waiting for node to be re-cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
+		t.Log("SUCCESS: Node re-cordoned due to unhealthy replacement pod")
 
-		// Verify node is cordoned again due to unhealthy replacement pod
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
+
+		return ctx
+	})
+
+	// Consolidated test: Init container CrashLoopBackOff detection and recovery
+	feature.Assess("Init container CrashLoopBackOff detection and recovery", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		dsName := "test-ds-init-crashloop"
+
+		// --- Phase 1: CrashLoopBackOff detection ---
+		t.Log("=== Phase 1: Init container CrashLoopBackOff detection ===")
+		ds := helpers.CreateTestDaemonSetWithInitCrashLoop(dsName, testCtx.Namespace, testCtx.NodeName)
+		err = client.Resources().Create(ctx, ds)
+		require.NoError(t, err)
+		t.Logf("Created DaemonSet %s with crashing init container", dsName)
+
+		t.Log("Waiting for init container to enter CrashLoopBackOff...")
+		pod := helpers.WaitForInitContainerCrashLoopBackOff(ctx, t, client, testCtx.Namespace, dsName)
+		require.NotNil(t, pod, "pod init container should be in CrashLoopBackOff")
+		t.Logf("Pod %s: phase=%s (Pending because init container crashing)", pod.Name, pod.Status.Phase)
+		require.Equal(t, v1.PodPending, pod.Status.Phase)
+
+		t.Log("Waiting for node to be cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, true, policyTimeoutWait)
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   true,
-			ExpectAnnotation: true,
+			ExpectCordoned: true,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, ShouldExist: true, Pattern: dsName},
+			},
 		})
-		t.Log("Node correctly re-cordoned due to unhealthy replacement pod - cycle behavior verified")
+		t.Log("Init container CrashLoopBackOff detected via 'phase != Running' check")
 
-		// Clean up
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
+		// --- Phase 2: Recovery ---
+		t.Log("=== Phase 2: Init container CrashLoopBackOff recovery ===")
+		t.Log("Fixing the crashing init container (changing 'exit 1' to 'exit 0')...")
+		err = helpers.FixCrashingInitContainer(ctx, client, testCtx.Namespace, dsName)
+		require.NoError(t, err)
+
+		helpers.WaitForDaemonSetPodRunning(ctx, t, client, testCtx.Namespace, dsName, testCtx.NodeName)
+		t.Log("New pod is Running (init container completed successfully)")
+
+		t.Log("Waiting for node to be uncordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testCtx.NodeName, false, policyTimeoutWait)
+		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: false,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, ShouldExist: false},
+			},
+		})
+		t.Log("SUCCESS: Node uncordoned after init container CrashLoopBackOff recovery")
+
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
 
 		return ctx
 	})
@@ -667,8 +616,12 @@ func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
 
 		// Clean up all DaemonSets
 		t.Log("Cleaning up test DaemonSets")
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName)
-		cleanupDaemonSet(ctx, t, client, testCtx.Namespace, testCtx.DaemonSetName2)
+		for _, dsName := range testCtx.DaemonSetNames {
+			helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, dsName)
+		}
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, "test-ds-init-crashloop")
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, "test-ds-init-deletion")
+		helpers.CleanupDaemonSet(ctx, t, client, testCtx.Namespace, "test-ds-init-cycle")
 
 		// Ensure node is uncordoned
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
@@ -687,179 +640,146 @@ func TestKubernetesObjectMonitorDaemonSetPodHealth(t *testing.T) {
 	testEnv.Test(t, feature.Feature())
 }
 
-// checkPodInAnnotation checks if a pod from a DaemonSet is tracked in the node annotation
-func checkPodInAnnotation(ctx context.Context, t *testing.T, client klient.Client, nodeName, dsName string) bool {
-	node, err := helpers.GetNodeByName(ctx, client, nodeName)
-	if err != nil {
-		return false
-	}
+// TestKubernetesObjectMonitorMainContainerFailures tests main container failure scenarios.
+// Main container CrashLoopBackOff has phase=Running (not Pending), so the policy must check
+// containerStatuses in addition to phase to detect unhealthy pods.
+//
+// This test validates:
+// 1. Main container CrashLoopBackOff detection (phase=Running, containerStatuses check)
+// 2. Recovery after fixing the container
+func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
+	feature := features.New("Kubernetes Object Monitor - Main Container Failures").
+		WithLabel("suite", "kubernetes-object-monitor").
+		WithLabel("component", "main-container-failures")
 
-	annotation, exists := node.Annotations[annotationKey]
-	if !exists || annotation == "" || annotation == "{}" {
-		return false
-	}
+	var testNodeName string
+	const dsName = "test-ds-crashloop"
 
-	var annotationMap map[string]string
-	if err := json.Unmarshal([]byte(annotation), &annotationMap); err != nil {
-		return false
-	}
+	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
 
-	// Look for pod tracking key containing the DaemonSet name (pod name starts with DS name)
-	for key := range annotationMap {
-		if strings.Contains(key, dsName) {
-			return true
+		// Find a real worker node (non-kwok, non-control-plane)
+		nodeList := &v1.NodeList{}
+		err = client.Resources().List(ctx, nodeList)
+		require.NoError(t, err)
+
+		for _, node := range nodeList.Items {
+			if node.Labels["type"] == "kwok" {
+				continue
+			}
+			_, isControlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
+			if isControlPlane {
+				continue
+			}
+			testNodeName = node.Name
+			break
 		}
-	}
-	return false
-}
+		require.NotEmpty(t, testNodeName, "no real worker node found in cluster")
+		t.Logf("Using test worker node: %s", testNodeName)
 
-// createTestDaemonSetWithUniqueSelector creates a DaemonSet with a unique selector.
-// When shouldFail=true, the pod includes an init container that sleeps indefinitely,
-// blocking the pod in Pending/Init state (Init:0/1). This triggers the policy condition
-// which checks for pods NOT in Running/Succeeded phase (resource.status.phase != 'Running').
-func createTestDaemonSetWithUniqueSelector(name, namespace, nodeName string, shouldFail bool) *appsv1.DaemonSet {
-	// Use the DaemonSet name as part of the selector to make it unique
-	selectorLabel := "app-" + name
+		// Ensure gpu-operator namespace exists
+		err = helpers.CreateNamespace(ctx, client, gpuOperatorNamespace)
+		require.NoError(t, err)
 
-	podSpec := v1.PodSpec{
-		NodeSelector: map[string]string{
-			"kubernetes.io/hostname": nodeName,
-		},
-		Containers: []v1.Container{
-			{
-				Name:    "main",
-				Image:   "busybox:latest",
-				Command: []string{"sh", "-c", "sleep 3600"},
-			},
-		},
-		RestartPolicy: v1.RestartPolicyAlways,
-		Tolerations: []v1.Toleration{
-			{Operator: v1.TolerationOpExists},
-		},
-	}
+		return ctx
+	})
 
-	// For failing pods, add an init container that never completes
-	// This keeps the pod in Pending (Init:0/1) state, which triggers the policy
-	// (policy checks resource.status.phase != 'Running')
-	if shouldFail {
-		podSpec.InitContainers = []v1.Container{
-			{
-				Name:    "init-blocker",
-				Image:   "busybox:latest",
-				Command: []string{"sh", "-c", "sleep 3600"},
-			},
-		}
-	}
+	// Consolidated test: Main container CrashLoopBackOff detection and recovery
+	feature.Assess("Main container CrashLoopBackOff detection and recovery", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
 
-	return &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app":  selectorLabel,
-				"test": "kubernetes-object-monitor",
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app": selectorLabel,
-				},
-			},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":  selectorLabel,
-						"test": "kubernetes-object-monitor",
-					},
-				},
-				Spec: podSpec,
-			},
-		},
-	}
-}
+		// --- Phase 1: CrashLoopBackOff detection ---
+		t.Log("=== Phase 1: Main container CrashLoopBackOff detection ===")
+		ds := helpers.CreateTestDaemonSetWithCrashLoop(dsName, gpuOperatorNamespace, testNodeName)
+		err = client.Resources().Create(ctx, ds)
+		require.NoError(t, err)
+		t.Logf("Created DaemonSet %s with crashing container", dsName)
 
-// Helper functions for DaemonSet tests
-// listDaemonSetPods returns all pods owned by the specified DaemonSet
-func listDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsName string) ([]v1.Pod, error) {
-	var podList v1.PodList
-	err := client.Resources(namespace).List(ctx, &podList)
-	if err != nil {
-		return nil, err
-	}
+		t.Log("Waiting for pod to enter CrashLoopBackOff state...")
+		pod := helpers.WaitForPodCrashLoopBackOff(ctx, t, client, gpuOperatorNamespace, dsName)
+		require.NotNil(t, pod, "pod should be in CrashLoopBackOff")
 
-	var dsPods []v1.Pod
-	for _, pod := range podList.Items {
-		for _, ownerRef := range pod.OwnerReferences {
-			if ownerRef.Kind == "DaemonSet" && ownerRef.Name == dsName {
-				dsPods = append(dsPods, pod)
-				break
+		// Verify pod phase is "Running" - this is why we need containerStatuses check
+		t.Logf("Pod %s: phase=%s (Running even though container is crashing)", pod.Name, pod.Status.Phase)
+		require.Equal(t, v1.PodRunning, pod.Status.Phase, "CrashLoopBackOff pod should have phase=Running")
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Waiting != nil {
+				t.Logf("  Container %s: ready=%v, restartCount=%d, state=Waiting (reason=%s)",
+					cs.Name, cs.Ready, cs.RestartCount, cs.State.Waiting.Reason)
+				require.Equal(t, "CrashLoopBackOff", cs.State.Waiting.Reason)
 			}
 		}
-	}
-	return dsPods, nil
-}
 
-// cleanupDaemonSet deletes a DaemonSet and waits for it and its pods to be fully deleted.
-func cleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, namespace, name string) {
-	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
+		t.Log("Waiting for node to be cordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testNodeName, true, policyTimeoutWait)
+		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: true,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, ShouldExist: true, Pattern: dsName},
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: true},
+			},
+		})
+		t.Log("Node cordoned - policy detected CrashLoopBackOff via containerStatuses")
 
-	// Check if DaemonSet exists first - skip cleanup if not found
-	err := client.Resources(namespace).Get(ctx, name, namespace, ds)
-	if apierrors.IsNotFound(err) {
-		t.Logf("DaemonSet %s/%s does not exist, skipping cleanup", namespace, name)
-		return
-	}
-	if err != nil {
-		t.Logf("Warning: error checking DaemonSet existence: %v", err)
-	}
+		// --- Phase 2: Recovery ---
+		t.Log("=== Phase 2: Main container recovery ===")
+		t.Log("Fixing the crashing container (changing 'exit 1' to 'sleep 3600')...")
+		err = helpers.FixCrashingContainer(ctx, client, gpuOperatorNamespace, dsName)
+		require.NoError(t, err)
 
-	// Delete the DaemonSet
-	if err := client.Resources().Delete(ctx, ds); err != nil {
-		if apierrors.IsNotFound(err) {
-			t.Logf("DaemonSet %s/%s already deleted", namespace, name)
-			return
+		t.Log("Waiting for new healthy pod...")
+		helpers.WaitForDaemonSetPodRunning(ctx, t, client, gpuOperatorNamespace, dsName, testNodeName)
+
+		// Verify the pod is actually healthy
+		pods, err := helpers.ListDaemonSetPods(ctx, client, gpuOperatorNamespace, dsName)
+		require.NoError(t, err)
+		require.Len(t, pods, 1, "expected exactly one pod")
+
+		healthyPod := pods[0]
+		t.Logf("Pod %s after fix: phase=%s", healthyPod.Name, healthyPod.Status.Phase)
+		require.Equal(t, v1.PodRunning, healthyPod.Status.Phase)
+
+		for _, cs := range healthyPod.Status.ContainerStatuses {
+			t.Logf("  Container %s: ready=%v, restartCount=%d", cs.Name, cs.Ready, cs.RestartCount)
+			require.True(t, cs.Ready, "container should be ready")
+			require.NotNil(t, cs.State.Running, "container should be in Running state")
 		}
-		t.Logf("Note: DaemonSet deletion returned error: %v", err)
-	}
 
-	// Wait for pods to be deleted
-	require.Eventually(t, func() bool {
-		pods, err := listDaemonSetPods(ctx, client, namespace, name)
-		return err == nil && len(pods) == 0
-	}, 5*time.Minute, 5*time.Second, "timed out waiting for pods of DaemonSet %s/%s to be deleted", namespace, name)
+		t.Log("Waiting for node to be uncordoned...")
+		helpers.WaitForQuarantineState(ctx, t, client, testNodeName, false, policyTimeoutWait)
+		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: false,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, ShouldExist: false},
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: false},
+			},
+		})
+		t.Log("SUCCESS: Node uncordoned after CrashLoopBackOff recovery")
 
-	// Wait for DaemonSet to be fully deleted
-	require.Eventually(t, func() bool {
-		err := client.Resources(namespace).Get(ctx, name, namespace, &appsv1.DaemonSet{})
-		if err == nil {
-			return false // Object still exists
+		return ctx
+	})
+
+	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		// Uncordon node first to allow cleanup (in case test failed midway)
+		node, err := helpers.GetNodeByName(ctx, client, testNodeName)
+		if err == nil && node.Spec.Unschedulable {
+			node.Spec.Unschedulable = false
+			if updateErr := client.Resources().Update(ctx, node); updateErr != nil {
+				t.Logf("Warning: failed to uncordon node: %v", updateErr)
+			}
 		}
-		if apierrors.IsNotFound(err) {
-			return true // Deleted successfully
-		}
-		// Transient error - log and retry
-		t.Logf("Note: transient error checking DaemonSet deletion: %v", err)
-		return false
-	}, 30*time.Second, 1*time.Second, "timed out waiting for DaemonSet %s/%s to be fully deleted", namespace, name)
-}
 
-// updateDaemonSetToHealthy updates a DaemonSet to remove the blocking init container,
-// allowing the pod to reach Running state.
-func updateDaemonSetToHealthy(ctx context.Context, client klient.Client, namespace, name string) error {
-	ds := &appsv1.DaemonSet{}
-	err := client.Resources(namespace).Get(ctx, name, namespace, ds)
-	if err != nil {
-		return err
-	}
+		// Clean up DaemonSet
+		helpers.CleanupDaemonSet(ctx, t, client, gpuOperatorNamespace, dsName)
 
-	// Remove init containers to allow pod to start normally
-	ds.Spec.Template.Spec.InitContainers = nil
+		return ctx
+	})
 
-	return client.Resources().Update(ctx, ds)
+	testEnv.Test(t, feature.Feature())
 }

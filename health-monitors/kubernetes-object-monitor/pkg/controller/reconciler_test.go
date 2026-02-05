@@ -128,6 +128,8 @@ func TestReconciler_NodeUnhealthyToHealthy(t *testing.T) {
 		// Verify recovery event has same resourceInfo as unhealthy event
 		return event.isHealthy &&
 			event.resourceInfo != nil &&
+			event.resourceInfo.Group == unhealthyResourceInfo.Group &&
+			event.resourceInfo.Version == unhealthyResourceInfo.Version &&
 			event.resourceInfo.Kind == unhealthyResourceInfo.Kind &&
 			event.resourceInfo.Name == unhealthyResourceInfo.Name &&
 			event.resourceInfo.Namespace == unhealthyResourceInfo.Namespace

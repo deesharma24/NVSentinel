@@ -62,6 +62,7 @@ func (p *Publisher) PublishHealthEvent(ctx context.Context,
 	}
 
 	// Build entitiesImpacted from resource info
+
 	var entitiesImpacted []*pb.Entity
 
 	if resourceInfo != nil {
@@ -72,7 +73,7 @@ func (p *Publisher) PublishHealthEvent(ctx context.Context,
 
 		entitiesImpacted = []*pb.Entity{
 			{
-				EntityType:  resourceInfo.Kind,
+				EntityType:  resourceInfo.GVK(),
 				EntityValue: entityValue,
 			},
 		}

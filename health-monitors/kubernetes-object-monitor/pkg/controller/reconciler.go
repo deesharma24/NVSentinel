@@ -161,6 +161,8 @@ func (r *ResourceReconciler) cleanupDeletedResource(ctx context.Context, req ctr
 			}
 
 			resourceInfo := &config.ResourceInfo{
+				Group:     r.gvk.Group,
+				Version:   r.gvk.Version,
 				Kind:      r.gvk.Kind,
 				Namespace: req.Namespace,
 				Name:      req.Name,
@@ -220,6 +222,8 @@ func (r *ResourceReconciler) reconcilePolicy(
 	r.matchStatesMu.RUnlock()
 
 	resourceInfo := &config.ResourceInfo{
+		Group:     r.gvk.Group,
+		Version:   r.gvk.Version,
 		Kind:      r.gvk.Kind,
 		Namespace: obj.GetNamespace(),
 		Name:      obj.GetName(),

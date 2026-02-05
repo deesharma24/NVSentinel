@@ -10,12 +10,13 @@ To monitor the GPU and Network operators, you must enable the `kubernetes-object
 
 These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. A health event is generated if a daemonset pod:
 - Has been assigned to a node, AND
-- Has **not** reached `Running` or `Succeeded` state within the configured threshold 
+- Is unhealthy: either **not** in `Running`/`Succeeded` state, OR has a container in `CrashLoopBackOff`
 
-This threshold allows sufficient time for normal pod initialization (image pulls, init containers, etc.) while detecting pods that are genuinely stuck in any non-progressing state such as:
-- Stuck in init container execution
+The policy detects pods that are genuinely stuck in any non-progressing state such as:
+- Stuck in init container execution (pod phase is `Pending`)
 - `Pending` due to resource constraints
-- `CrashLoopBackOff` in containers
+- `CrashLoopBackOff` in main containers (pod phase is `Running` but container is crashing)
+- `CrashLoopBackOff` in init containers (pod phase is `Pending`)
 - `ImagePullBackOff` errors
 - Any other state preventing the pod from becoming healthy
 
@@ -56,17 +57,29 @@ kubernetes-object-monitor:
         # 1. Pod is in gpu-operator namespace
         # 2. Pod is owned by a DaemonSet (we only monitor DaemonSet pods)
         # 3. Pod has been assigned to a node (nodeName is set)
-        # 4. Pod is NOT in Running or Succeeded state
-        # 5. Pod has been in this non-healthy state for more than configured threshold
+        # 4. Pod is unhealthy: either NOT in Running/Succeeded state OR in CrashLoopBackOff
+        # 5. Pod has been running for at least the configured threshold (grace period)
+        #
+        # Note: CrashLoopBackOff pods have phase=Running but container is in Waiting state
+        # with reason=CrashLoopBackOff, so we must check containerStatuses explicitly.
         expression: |
           resource.metadata.namespace == 'gpu-operator' && 
           has(resource.metadata.ownerReferences) &&
           resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet') &&
           has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
-          resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded' &&
           has(resource.status.startTime) &&
-          now - timestamp(resource.status.startTime) > duration('30m')
+          now - timestamp(resource.status.startTime) > duration('30m') &&
+          (
+            (resource.status.phase != 'Running' && resource.status.phase != 'Succeeded') ||
+            (
+              has(resource.status.containerStatuses) &&
+              resource.status.containerStatuses.exists(cs,
+                has(cs.state.waiting) && 
+                has(cs.state.waiting.reason) && 
+                cs.state.waiting.reason == 'CrashLoopBackOff'
+              )
+            )
+          )
       nodeAssociation:
         expression: resource.spec.nodeName
       healthEvent:
@@ -85,21 +98,24 @@ kubernetes-object-monitor:
         version: v1
         kind: Pod
       predicate:
-        # Trigger event if:
-        # 1. Pod is in network-operator namespace
-        # 2. Pod is owned by a DaemonSet
-        # 3. Pod has been assigned to a node (nodeName is set)
-        # 4. Pod is NOT in Running or Succeeded state
-        # 5. Pod has been in this non-healthy state for more than configured threshold
         expression: |
           resource.metadata.namespace == 'network-operator' && 
           has(resource.metadata.ownerReferences) &&
           resource.metadata.ownerReferences.exists(r, r.kind == 'DaemonSet') &&
           has(resource.spec.nodeName) && resource.spec.nodeName != "" &&
-          resource.status.phase != 'Running' && 
-          resource.status.phase != 'Succeeded' &&
           has(resource.status.startTime) &&
-          now - timestamp(resource.status.startTime) > duration('30m')
+          now - timestamp(resource.status.startTime) > duration('30m') &&
+          (
+            (resource.status.phase != 'Running' && resource.status.phase != 'Succeeded') ||
+            (
+              has(resource.status.containerStatuses) &&
+              resource.status.containerStatuses.exists(cs,
+                has(cs.state.waiting) && 
+                has(cs.state.waiting.reason) && 
+                cs.state.waiting.reason == 'CrashLoopBackOff'
+              )
+            )
+          )
       nodeAssociation:
         expression: resource.spec.nodeName
       healthEvent:
@@ -115,28 +131,30 @@ kubernetes-object-monitor:
 
 The policy triggers when **all** of the following conditions are true:
 
-| Condition       | Check                                                     |
-|:----------------|:----------------------------------------------------------|
-| Namespace       | Pod is in `gpu-operator` or `network-operator` namespace  |
-| DaemonSet owned | Pod has a DaemonSet owner reference                       |
-| Node assigned   | Pod has `spec.nodeName` set (scheduled to a node)         |
-| Not healthy     | Pod phase is NOT `Running` and NOT `Succeeded`            |
-| Time threshold  | Pod has been in this state for more than 30 minutes       |
+| Condition       | Check                                                                  |
+|:----------------|:-----------------------------------------------------------------------|
+| Namespace       | Pod is in `gpu-operator` or `network-operator` namespace               |
+| DaemonSet owned | Pod has a DaemonSet owner reference                                    |
+| Node assigned   | Pod has `spec.nodeName` set (scheduled to a node)                      |
+| Time threshold  | Pod has been running for more than the configured threshold            |
+| Unhealthy       | Pod phase is NOT `Running`/`Succeeded` OR container in CrashLoopBackOff |
 
 > **Note:** Only DaemonSet pods are monitored. Pods owned by ReplicaSets, Deployments, Jobs, or standalone pods are not monitored by these policies. This is because DaemonSet pods are the critical infrastructure components that affect GPU node health.
 
 ### What This Catches
 
-| Stuck State                              | Detected?                |
-|:-----------------------------------------|:-------------------------|
-| Stuck in init containers                 | Yes (after threshold)    |
-| `Pending` (scheduling/resource issues)   | Yes (after threshold)    |
-| `CrashLoopBackOff`                       | Yes (after threshold)    |
-| `ImagePullBackOff` / `ErrImagePull`      | Yes (after threshold)    |
-| `Failed` phase                           | Yes (after threshold)    |
-| Normal initialization (< threshold)      | No (grace period)        |
-| `Running`                                | No (healthy)             |
-| `Succeeded`                              | No (completed successfully) |
+| Stuck State                            | Pod Phase   | Detected?                     |
+|:---------------------------------------|:------------|:------------------------------|
+| Stuck in init containers               | `Pending`   | Yes (phase check)             |
+| Init container `CrashLoopBackOff`      | `Pending`   | Yes (phase check)             |
+| Main container `CrashLoopBackOff`      | `Running`   | Yes (containerStatuses check) |
+| `Pending` (scheduling/resource issues) | `Pending`   | Yes (phase check)             |
+| `ImagePullBackOff` / `ErrImagePull`    | `Pending`   | Yes (phase check)             |
+| `Failed` phase                         | `Failed`    | Yes (phase check)             |
+| Normal initialization (< threshold)    | Any         | No (grace period)             |
+| Healthy pod                            | `Running`   | No (healthy)                  |
+| Completed job                          | `Succeeded` | No (completed)                |
+
 
 ## Pod Tracking Behavior
 
@@ -144,8 +162,14 @@ The kubernetes-object-monitor tracks each pod individually by name. This simple 
 
 ### Scenario: Pod Becomes Unhealthy
 
-1. **Pod enters unhealthy state** (e.g., CrashLoopBackOff) → Node is cordoned after threshold
-2. **Pod becomes healthy** (Running) → Node is uncordoned
+1. **Pod enters unhealthy state** (e.g., init container stuck, CrashLoopBackOff) → Node is cordoned after threshold
+2. **Pod becomes healthy** (Running with all containers ready) → Node is uncordoned
+
+### Scenario: Main Container CrashLoopBackOff
+
+1. **Container crashes repeatedly** → Pod phase stays `Running`, but container enters `CrashLoopBackOff`
+2. **Policy detects via containerStatuses check** → Node is cordoned
+3. **Container is fixed and becomes healthy** → Node is uncordoned
 
 ### Scenario: Pod Deletion
 
