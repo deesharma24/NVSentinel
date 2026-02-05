@@ -2872,7 +2872,10 @@ func WaitForCrashLoopBackOff(
 }
 
 // WaitForDaemonSetPodRunning waits for a DaemonSet pod to reach Running state with all
-// containers ready. This is useful after fixing a crashing container to verify recovery.
+// containers ready, and ensures no terminating pods exist. The function waits until:
+// 1. All terminating pods are fully deleted
+// 2. Exactly one pod exists on the target node
+// 3. That pod is Running and Ready (using isPodRunningAndReady)
 func WaitForDaemonSetPodRunning(
 	ctx context.Context, t *testing.T, client klient.Client, namespace, dsName, nodeName string,
 ) {
@@ -2885,36 +2888,31 @@ func WaitForDaemonSetPodRunning(
 			return false
 		}
 
+		var podsOnNode []v1.Pod
+
 		for _, pod := range pods {
-			// Check if pod is on the expected node
-			if pod.Spec.NodeName != nodeName {
-				continue
-			}
-
-			// Check if pod is Running
-			if pod.Status.Phase != v1.PodRunning {
-				t.Logf("Pod %s phase: %s (waiting for Running)", pod.Name, pod.Status.Phase)
-				return false
-			}
-
-			// Check if all containers are ready
-			allReady := true
-
-			for _, cs := range pod.Status.ContainerStatuses {
-				if !cs.Ready {
-					t.Logf("Pod %s container %s not ready yet", pod.Name, cs.Name)
-
-					allReady = false
-				}
-			}
-
-			if allReady && len(pod.Status.ContainerStatuses) > 0 {
-				t.Logf("Pod %s is Running with all containers ready", pod.Name)
-				return true
+			if pod.Spec.NodeName == nodeName {
+				podsOnNode = append(podsOnNode, pod)
 			}
 		}
 
-		return false
+		// Ensure exactly one non-terminating pod exists on the node
+		if len(podsOnNode) != 1 {
+			t.Logf("Expected 1 pod on node %s, found %d", nodeName, len(podsOnNode))
+			return false
+		}
+
+		pod := &podsOnNode[0]
+
+		// isPodRunningAndReady checks DeletionTimestamp, Phase, and Ready condition
+		if !isPodRunningAndReady(pod) {
+			t.Logf("Pod %s: phase=%s, deletionTimestamp=%v", pod.Name, pod.Status.Phase, pod.DeletionTimestamp)
+			return false
+		}
+
+		t.Logf("Pod %s is Running and Ready", pod.Name)
+
+		return true
 	}, EventuallyWaitTimeout, WaitInterval,
 		"DaemonSet %s pod on node %s did not reach Running state", dsName, nodeName)
 }

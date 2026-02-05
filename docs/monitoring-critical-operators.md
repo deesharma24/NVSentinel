@@ -8,7 +8,7 @@ NVSentinel provides a built-in mechanism to monitor these operators and report h
 ## Configuration
 To monitor the GPU and Network operators, you must enable the `kubernetes-object-monitor` component and define the monitoring policies in your NVSentinel `values.yaml`.
 
-These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. A health event is generated if a daemonset pod:
+These policies monitor **DaemonSet pods** in the `gpu-operator` and `network-operator` namespaces. A health event is generated if a DaemonSet pod:
 - Has been assigned to a node, AND
 - Is unhealthy: either **not** in `Running`/`Succeeded` state, OR has a container in `CrashLoopBackOff`
 
@@ -21,7 +21,6 @@ The policy detects pods that are genuinely stuck in any non-progressing state su
 - Any other state preventing the pod from becoming healthy
 
 ### Pod Health Tracking (DaemonSet Only)
-
 The policies track individual pods owned by daemonsets by name. When a pod's health state changes:
 - **Pod becomes unhealthy** → Node is cordoned
 - **Pod becomes healthy** → Node is uncordoned
@@ -85,7 +84,7 @@ kubernetes-object-monitor:
       healthEvent:
         componentClass: Software
         isFatal: true
-        message: "GPU Operator DaemonSet pod has not reached Running state within 30 minutes"
+        message: "GPU Operator DaemonSet pod is not healthy"
         recommendedAction: CONTACT_SUPPORT
         errorCode:
           - GPU_OPERATOR_POD_UNHEALTHY
@@ -121,7 +120,7 @@ kubernetes-object-monitor:
       healthEvent:
         componentClass: Software
         isFatal: true
-        message: "Network Operator pod has not reached Running state within 30 minutes"
+        message: "Network Operator DaemonSet pod is not healthy"
         recommendedAction: CONTACT_SUPPORT
         errorCode:
           - NETWORK_OPERATOR_POD_UNHEALTHY
