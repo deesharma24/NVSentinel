@@ -35,3 +35,7 @@ dcgm_api_failures = Counter(
     "Number of times an error has occurred",
     labelnames=["error_name"],
 )
+gpu_count_check_sysfs_scan_failure = Gauge(
+    "gpu_count_check_sysfs_scan_failure",
+    "Set to 1 when sysfs GPU enumeration returns zero GPUs, disabling the GPU count check",
+)

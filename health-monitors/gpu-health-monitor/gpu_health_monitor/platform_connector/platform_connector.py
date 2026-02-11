@@ -364,6 +364,117 @@ class PlatformConnectorEventProcessor(dcgmtypes.CallbackInterface):
         )
         return False
 
+    def _clear_gpu_count_mismatch(self, timestamp: Timestamp) -> None:
+
+        check_name = "GpuTotalCountMismatch"
+        key = self._build_cache_key(check_name, "GPU_TOTAL_COUNT", "ALL")
+
+        # Send if key is not in cache (first cycle) or if previous state was unhealthy
+        if key not in self.entity_cache or not self.entity_cache[key].isHealthy:
+            event_metadata = {}
+            chassis_serial = self._metadata_reader.get_chassis_serial()
+            if chassis_serial:
+                event_metadata["chassis_serial"] = chassis_serial
+
+            health_event = platformconnector_pb2.HealthEvent(
+                version=self._version,
+                agent=self._agent,
+                componentClass=self._component_class,
+                checkName=check_name,
+                generatedTimestamp=timestamp,
+                isFatal=False,
+                isHealthy=True,
+                errorCode=[],
+                entitiesImpacted=[],
+                message="GpuTotalCountMismatch health event reported no errors",
+                recommendedAction=platformconnector_pb2.NONE,
+                nodeName=self._node_name,
+                metadata=event_metadata,
+                processingStrategy=self._processing_strategy,
+            )
+
+            try:
+                if self.send_health_event_with_retries([health_event]):
+                    self.entity_cache[key] = CachedEntityState(isFatal=False, isHealthy=True)
+                    log.info(f"Updated cache for key {key} after successful send")
+            except Exception as e:
+                log.exception(f"Exception while sending GPU count match resolved event: {e}")
+
+    def gpu_count_check_completed(self, sysfs_gpu_pci_addresses: list[str], dcgm_gpu_ids: list[int]) -> None:
+        """Handle GPU count check: detect mismatch or clear previous mismatch."""
+        with metrics.dcgm_health_events_publish_time_to_grpc_channel.labels("gpu_count_check_to_grpc_channel").time():
+            timestamp = Timestamp()
+            timestamp.GetCurrentTime()
+
+            if len(sysfs_gpu_pci_addresses) != len(dcgm_gpu_ids):
+                self._send_gpu_count_mismatch_event(timestamp, sysfs_gpu_pci_addresses, dcgm_gpu_ids)
+            else:
+                self._clear_gpu_count_mismatch(timestamp)
+
+    def _send_gpu_count_mismatch_event(
+        self,
+        timestamp: Timestamp,
+        sysfs_gpu_pci_addresses: list[str],
+        dcgm_gpu_ids: list[int],
+    ) -> None:
+        """Send unhealthy health event for GPU count mismatch."""
+        check_name = "GpuTotalCountMismatch"
+        key = self._build_cache_key(check_name, "GPU_TOTAL_COUNT", "ALL")
+
+        # Only send if state changed (avoid flooding)
+        if key in self.entity_cache and not self.entity_cache[key].isHealthy:
+            return
+
+        # Determine which PCI addresses are in sysfs but not in DCGM
+        dcgm_pci_addresses = set()
+        for gpu_id in dcgm_gpu_ids:
+            pci = self._metadata_reader.get_pci_address(gpu_id)
+            if pci:
+                dcgm_pci_addresses.add(pci)
+
+        sysfs_pci_set = set(sysfs_gpu_pci_addresses)
+        missing_from_driver = sorted(sysfs_pci_set - dcgm_pci_addresses)
+
+        entities_impacted = []
+        for pci_addr in missing_from_driver:
+            entities_impacted.append(platformconnector_pb2.Entity(entityType="PCI", entityValue=pci_addr))
+
+        message = (
+            f"GPU count mismatch: {len(sysfs_gpu_pci_addresses)} GPUs found on PCIe bus "
+            f"but {len(dcgm_gpu_ids)} visible to S/W. "
+            f"Missing from driver: [{', '.join(missing_from_driver)}]. "
+            f"Run nvidia-smi to verify the GPU count."
+        )
+
+        event_metadata = {}
+        chassis_serial = self._metadata_reader.get_chassis_serial()
+        if chassis_serial:
+            event_metadata["chassis_serial"] = chassis_serial
+
+        health_event = platformconnector_pb2.HealthEvent(
+            version=self._version,
+            agent=self._agent,
+            componentClass=self._component_class,
+            checkName=check_name,
+            generatedTimestamp=timestamp,
+            isFatal=True,
+            isHealthy=False,
+            errorCode=["GPU_TOTAL_COUNT_MISMATCH"],
+            entitiesImpacted=entities_impacted,
+            message=message,
+            recommendedAction=platformconnector_pb2.RESTART_VM,
+            nodeName=self._node_name,
+            metadata=event_metadata,
+            processingStrategy=self._processing_strategy,
+        )
+
+        try:
+            if self.send_health_event_with_retries([health_event]):
+                self.entity_cache[key] = CachedEntityState(isFatal=True, isHealthy=False)
+                log.info("GPU count mismatch event sent successfully")
+        except Exception as e:
+            log.error(f"Exception while sending GPU count mismatch event: {e}")
+
     def dcgm_connectivity_failed(self) -> None:
         """Handle DCGM connectivity failure event."""
         with metrics.dcgm_health_events_publish_time_to_grpc_channel.labels(

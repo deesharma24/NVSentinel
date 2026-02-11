@@ -78,6 +78,13 @@ def _init_event_processor(
     help="Event processing strategy: EXECUTE_REMEDIATION or STORE_ONLY",
     required=False,
 )
+@click.option(
+    "--gpu-count-check-enabled",
+    type=bool,
+    default=True,
+    help="Enable GPU count check comparing PCIe bus vs driver-visible GPUs",
+    required=False,
+)
 def cli(
     dcgm_addr,
     dcgm_error_mapping_config_file,
@@ -88,6 +95,7 @@ def cli(
     dcgm_k8s_service_enabled,
     metadata_path,
     processing_strategy,
+    gpu_count_check_enabled,
 ):
     exit = Event()
     config = configparser.ConfigParser()
@@ -164,6 +172,7 @@ def cli(
         poll_interval_seconds=int(dcgm_config["PollIntervalSeconds"]),
         callbacks=enabled_event_processors,
         dcgm_k8s_service_enabled=dcgm_k8s_service_enabled,
+        gpu_count_check_enabled=gpu_count_check_enabled,
     )
     dcgm_watcher.start([], exit)
 

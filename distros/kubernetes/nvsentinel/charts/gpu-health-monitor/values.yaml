@@ -52,6 +52,12 @@ tolerations: []
 
 podAnnotations: {}
 
+# GPU count check configuration
+# Compares PCIe bus GPU count (sysfs) vs driver-visible GPU count (DCGM)
+# and sends a health event on mismatch
+gpuCountCheck:
+  enabled: true
+
 verbose: "False"
 
 # Processing strategy for health events

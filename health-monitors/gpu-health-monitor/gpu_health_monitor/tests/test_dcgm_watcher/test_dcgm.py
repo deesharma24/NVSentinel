@@ -34,6 +34,9 @@ class FakeEventProcessorInTest(dcgm.types.CallbackInterface):
     def dcgm_connectivity_failed(self):
         self.connectivity_failed_called = True
 
+    def gpu_count_check_completed(self, sysfs_gpu_pci_addresses: list[str], dcgm_gpu_ids: list[int]):
+        pass
+
 
 class TestDCGMHealthChecks:
 

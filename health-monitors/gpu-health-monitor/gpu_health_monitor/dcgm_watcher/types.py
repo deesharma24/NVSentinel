@@ -49,3 +49,12 @@ class CallbackInterface(abc.ABC):
     def dcgm_connectivity_failed(self):
         """Called when DCGM connectivity fails during health check."""
         pass
+
+    @abc.abstractmethod
+    def gpu_count_check_completed(self, sysfs_gpu_pci_addresses: list[str], dcgm_gpu_ids: list[int]) -> None:
+        """Called every cycle after health check with sysfs and DCGM GPU info.
+
+        The implementation compares counts and handles mismatch detection
+        and resolution internally.
+        """
+        pass

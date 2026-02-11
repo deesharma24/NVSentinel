@@ -23,6 +23,8 @@ import subprocess
 import time
 import os
 
+from gpu_health_monitor.pcie import get_nvidia_gpu_pci_addresses
+
 DELAY, MULTIPLIER, MAX_DELAY = 2, 1.5, 120
 DCGM_4_PYTHON_PATH = "/usr/share/datacenter-gpu-manager-4/bindings/python3"
 
@@ -34,6 +36,7 @@ class DCGMWatcher:
         poll_interval_seconds: int,
         callbacks: list[types.CallbackInterface],
         dcgm_k8s_service_enabled: bool,
+        gpu_count_check_enabled: bool = True,
     ) -> None:
         self._addr = addr
         self._poll_interval_seconds = poll_interval_seconds
@@ -48,6 +51,7 @@ class DCGMWatcher:
 
         self._callback_thread_pool = ThreadPoolExecutor()
         self._dcgm_k8s_service_enabled = dcgm_k8s_service_enabled
+        self._gpu_count_check_enabled = gpu_count_check_enabled
 
     def _get_available_health_watches(self) -> dict[int, str]:
         health_watches = {}
@@ -269,6 +273,23 @@ class DCGMWatcher:
         dcgm_group = None
         gpu_ids = []
 
+        # Cache sysfs GPU addresses (static per boot) if GPU count check is enabled
+        sysfs_gpu_pci_addresses = []
+        metrics.gpu_count_check_sysfs_scan_failure.set(0)
+        if self._gpu_count_check_enabled:
+            sysfs_gpu_pci_addresses = get_nvidia_gpu_pci_addresses()
+            if not sysfs_gpu_pci_addresses:
+                log.warning(
+                    "Sysfs GPU enumeration returned 0 GPUs (/sys may not be mounted or "
+                    "accessible). Disabling GPU count check to avoid false results."
+                )
+                metrics.gpu_count_check_sysfs_scan_failure.set(1)
+                self._gpu_count_check_enabled = False
+            else:
+                log.info(f"Sysfs GPU count (PCIe hardware): {len(sysfs_gpu_pci_addresses)}")
+        else:
+            log.info("GPU count check is disabled")
+
         # Initial DCGM handle and monitoring setup
         while not exit.is_set():
             with metrics.overall_reconcile_loop_time.time():
@@ -299,6 +320,18 @@ class DCGMWatcher:
                             types.CallbackInterface.health_event_occurred.__name__,
                             [health_status, gpu_ids],
                         )
+
+                        # GPU count check: compare sysfs (hardware) vs DCGM
+                        if self._gpu_count_check_enabled:
+                            if len(sysfs_gpu_pci_addresses) != len(gpu_ids):
+                                log.warning(
+                                    f"GPU count mismatch detected: sysfs={len(sysfs_gpu_pci_addresses)}, "
+                                    f"DCGM={len(gpu_ids)}"
+                                )
+                            self._fire_callback_funcs(
+                                types.CallbackInterface.gpu_count_check_completed.__name__,
+                                [sysfs_gpu_pci_addresses, gpu_ids],
+                            )
 
             log.debug("Waiting till next cycle")
             exit.wait(self._poll_interval_seconds)

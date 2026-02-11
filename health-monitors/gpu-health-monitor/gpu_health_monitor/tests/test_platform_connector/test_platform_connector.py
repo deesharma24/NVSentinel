@@ -735,6 +735,148 @@ class TestPlatformConnectors(unittest.TestCase):
 
         server.stop(0)
 
+    def test_gpu_count_mismatch_sends_unhealthy_event(self):
+        """Test that sysfs > DCGM GPU count fires an unhealthy GpuTotalCountMismatch event."""
+        healthEventProcessor = PlatformConnectorServicer()
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        platformconnector_pb2_grpc.add_PlatformConnectorServicer_to_server(healthEventProcessor, server)
+        server.add_insecure_port(f"unix://{socket_path}")
+        server.start()
+
+        exit = Event()
+
+        # 4-GPU metadata so the processor can resolve PCI addresses
+        gpu_count_metadata = {
+            "version": "1.0",
+            "timestamp": "2025-11-07T10:00:00Z",
+            "node_name": "test-node",
+            "chassis_serial": "CHASSIS-12345",
+            "gpus": [
+                {
+                    "gpu_id": i,
+                    "uuid": f"GPU-{i:08d}",
+                    "pci_address": addr,
+                    "serial_number": f"SN-{i}",
+                    "device_name": "NVIDIA H100",
+                    "nvlinks": [],
+                }
+                for i, addr in enumerate(["0000:04:00.0", "0000:05:00.0", "0000:41:00.0", "0000:82:00.0"])
+            ],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            json.dump(gpu_count_metadata, f)
+            temp_file_path = f.name
+
+        try:
+            processor = platform_connector.PlatformConnectorEventProcessor(
+                socket_path=socket_path,
+                node_name=node_name,
+                exit=exit,
+                dcgm_errors_info_dict={},
+                state_file_path="statefile",
+                dcgm_health_conditions_categorization_mapping_config={"DCGM_HEALTH_WATCH_PCIE": "Fatal"},
+                metadata_path=temp_file_path,
+                processing_strategy=platformconnector_pb2.EXECUTE_REMEDIATION,
+            )
+
+            # sysfs sees 4 GPUs, DCGM sees 3 (GPU 3 missing from driver)
+            sysfs = ["0000:04:00.0", "0000:05:00.0", "0000:41:00.0", "0000:82:00.0"]
+            processor.gpu_count_check_completed(sysfs, [0, 1, 2])
+
+            events = healthEventProcessor.health_events
+            assert len(events) == 1
+
+            event = events[0]
+            assert event.checkName == "GpuTotalCountMismatch"
+            assert event.isFatal is True
+            assert event.isHealthy is False
+            assert event.errorCode == ["GPU_TOTAL_COUNT_MISMATCH"]
+            assert event.recommendedAction == platformconnector_pb2.RESTART_VM
+            assert event.nodeName == node_name
+            assert len(event.entitiesImpacted) == 1
+            assert event.entitiesImpacted[0].entityType == "PCI"
+            assert event.entitiesImpacted[0].entityValue == "0000:82:00.0"
+            assert "4 GPUs found on PCIe bus" in event.message
+            assert "3 visible to S/W" in event.message
+            assert event.metadata["chassis_serial"] == "CHASSIS-12345"
+
+            server.stop(0)
+        finally:
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
+    def test_gpu_count_mismatch_then_resolved(self):
+        """Test full lifecycle: mismatch detected then resolved."""
+        healthEventProcessor = PlatformConnectorServicer()
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        platformconnector_pb2_grpc.add_PlatformConnectorServicer_to_server(healthEventProcessor, server)
+        server.add_insecure_port(f"unix://{socket_path}")
+        server.start()
+
+        exit = Event()
+
+        gpu_count_metadata = {
+            "version": "1.0",
+            "timestamp": "2025-11-07T10:00:00Z",
+            "node_name": "test-node",
+            "chassis_serial": "CHASSIS-12345",
+            "gpus": [
+                {
+                    "gpu_id": i,
+                    "uuid": f"GPU-{i:08d}",
+                    "pci_address": addr,
+                    "serial_number": f"SN-{i}",
+                    "device_name": "NVIDIA H100",
+                    "nvlinks": [],
+                }
+                for i, addr in enumerate(["0000:04:00.0", "0000:05:00.0", "0000:41:00.0", "0000:82:00.0"])
+            ],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+            json.dump(gpu_count_metadata, f)
+            temp_file_path = f.name
+
+        try:
+            processor = platform_connector.PlatformConnectorEventProcessor(
+                socket_path=socket_path,
+                node_name=node_name,
+                exit=exit,
+                dcgm_errors_info_dict={},
+                state_file_path="statefile",
+                dcgm_health_conditions_categorization_mapping_config={"DCGM_HEALTH_WATCH_PCIE": "Fatal"},
+                metadata_path=temp_file_path,
+                processing_strategy=platformconnector_pb2.EXECUTE_REMEDIATION,
+            )
+
+            sysfs = ["0000:04:00.0", "0000:05:00.0", "0000:41:00.0", "0000:82:00.0"]
+
+            # Step 1: mismatch (sysfs=4, DCGM=3)
+            processor.gpu_count_check_completed(sysfs, [0, 1, 2])
+            events = healthEventProcessor.health_events
+            assert len(events) == 1
+            assert events[0].isHealthy is False
+            assert events[0].checkName == "GpuTotalCountMismatch"
+
+            key = processor._build_cache_key("GpuTotalCountMismatch", "GPU_TOTAL_COUNT", "ALL")
+            assert key in processor.entity_cache
+            assert processor.entity_cache[key].isHealthy is False
+
+            # Step 2: resolved (sysfs=4, DCGM=4)
+            healthEventProcessor.health_events = []
+            processor.gpu_count_check_completed(sysfs, [0, 1, 2, 3])
+            events = healthEventProcessor.health_events
+            assert len(events) == 1
+            assert events[0].isHealthy is True
+            assert events[0].checkName == "GpuTotalCountMismatch"
+            assert events[0].recommendedAction == platformconnector_pb2.NONE
+            assert "reported no errors" in events[0].message
+            assert processor.entity_cache[key].isHealthy is True
+
+            server.stop(0)
+        finally:
+            if os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+
     def test_event_retry_and_cache_cleanup_when_platform_connector_down(self) -> None:
         """Test when platform connector goes down and comes back up."""
         import tempfile
