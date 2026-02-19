@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Maintenance monitoring Deployment — runs csp-health-monitor + maintenance-notifier on system nodes.
+# Disable for CSPs that don't support maintenance monitoring (Azure, OCI).
+maintenanceMonitoring:
+  enabled: true
+
 replicaCount: 1
 
 image:
@@ -62,7 +67,9 @@ logLevel: info
 # Client certificate mount path for database connections
 clientCertMountPath: /etc/ssl/client-certs
 
-# cspName specifies the active cloud service provider. Can be "gcp" or "aws".
+# cspName specifies the active cloud service provider.
+# Used by both maintenanceMonitoring (Deployment) and gpuSpecMonitor (DaemonSet).
+# Valid values: gcp | aws | azure | oci
 cspName: ""
 
 # config.toml content will be generated from the fields below using the configmap template.
@@ -92,3 +99,36 @@ configToml:
     # If empty, defaults to "<clusterName>-nvsentinel-health-monitor-assume-role-policy".
     # Set this if your cluster name exceeds 19 characters (AWS IAM role names max 64 chars).
     iamRoleName: ""
+
+# GPU Spec Monitor DaemonSet — runs on GPU worker nodes.
+# Fetches expected GPU spec from the CSP API once at startup, then
+# periodically checks the actual GPU count via NVML and publishes
+# health events on mismatch.  Exposes Prometheus metrics.
+# Uses top-level cspName to determine the active CSP.
+gpuSpecMonitor:
+  enabled: false
+  image:
+    repository: ghcr.io/nvidia/nvsentinel/gpu-spec-monitor
+    pullPolicy: IfNotPresent
+  # hostNetwork is required for GCP (IMDS unreachable without it on GKE).
+  # Not needed for AWS, Azure, or OCI.
+  hostNetwork: false
+  # Interval (in seconds) between NVML GPU count checks.
+  # The CSP API is called only once at startup; this controls NVML polling only.
+  pollIntervalSeconds: 900
+  logLevel: info
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  # Extra environment variables for CSP-specific configuration.
+  # Example for OCI (set per cluster when enabling gpu-spec-monitor on OKE):
+  #   extraEnv:
+  #     - name: OCI_RESOURCE_PRINCIPAL_VERSION
+  #       value: "2.2"
+  #     - name: OCI_RESOURCE_PRINCIPAL_REGION
+  #       value: "uk-london-1"
+  extraEnv: []
