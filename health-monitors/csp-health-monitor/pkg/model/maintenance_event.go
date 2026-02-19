@@ -53,8 +53,10 @@ type ProviderStatus string
 
 // Constants for CSP types
 const (
-	CSPGCP CSP = "gcp"
-	CSPAWS CSP = "aws"
+	CSPGCP   CSP = "gcp"
+	CSPAWS   CSP = "aws"
+	CSPAzure CSP = "azure"
+	CSPOCI   CSP = "oci"
 )
 
 // Constants for maintenance types

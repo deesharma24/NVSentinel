@@ -37,7 +37,7 @@ ALL_MODULES := $(GO_MODULES) $(PYTHON_MODULES) $(CONTAINER_MODULES)
 
 # Build all Docker images for local development
 .PHONY: build-all
-build-all: build-gpu-health-monitor build-syslog-health-monitor build-metadata-collector build-log-collector
+build-all: build-gpu-health-monitor build-syslog-health-monitor build-metadata-collector build-gpu-spec-monitor build-log-collector
 	@echo "All Docker images built successfully for local development"
 
 # GPU health monitor (special case with DCGM variants)
@@ -67,6 +67,11 @@ build-metadata-collector:
 	@echo "Building metadata collector..."
 	$(MAKE) -C ../metadata-collector docker-build
 
+.PHONY: build-gpu-spec-monitor
+build-gpu-spec-monitor:
+	@echo "Building gpu-spec-monitor (CUDA + NVML)..."
+	$(MAKE) -C ../health-monitors/csp-health-monitor docker-build-gpu-spec-monitor
+
 .PHONY: build-log-collector
 build-log-collector:
 	@echo "Building log collector..."
@@ -79,7 +84,7 @@ build-log-collector:
 
 # Publish all Docker images to registry (CI-like behavior)
 .PHONY: publish-all
-publish-all: publish-gpu-health-monitor publish-syslog-health-monitor publish-metadata-collector publish-log-collector
+publish-all: publish-gpu-health-monitor publish-syslog-health-monitor publish-metadata-collector publish-gpu-spec-monitor publish-log-collector
 	@echo "All Docker images published successfully to registry"
 
 # GPU health monitor publish (special case with DCGM variants)
@@ -109,6 +114,11 @@ publish-metadata-collector:
 	@echo "Publishing metadata collector..."
 	$(MAKE) -C ../metadata-collector docker-publish
 
+.PHONY: publish-gpu-spec-monitor
+publish-gpu-spec-monitor:
+	@echo "Publishing gpu-spec-monitor..."
+	$(MAKE) -C ../health-monitors/csp-health-monitor docker-publish-gpu-spec-monitor
+
 .PHONY: publish-log-collector
 publish-log-collector:
 	@echo "Publishing log collector..."
@@ -120,11 +130,11 @@ publish-log-collector:
 
 # Health monitors group
 .PHONY: build-health-monitors
-build-health-monitors: build-gpu-health-monitor build-syslog-health-monitor
+build-health-monitors: build-gpu-health-monitor build-syslog-health-monitor build-gpu-spec-monitor
 	@echo "All health monitor Docker images built successfully"
 
 .PHONY: publish-health-monitors
-publish-health-monitors: publish-gpu-health-monitor publish-syslog-health-monitor
+publish-health-monitors: publish-gpu-health-monitor publish-syslog-health-monitor publish-gpu-spec-monitor
 	@echo "All health monitor Docker images published successfully"
 
 # Main modules group (non-health-monitors)
