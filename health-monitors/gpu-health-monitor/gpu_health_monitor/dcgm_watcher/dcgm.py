@@ -196,7 +196,7 @@ class DCGMWatcher:
                         f"Unknown health watch system value {incident.system} "
                         f"for entity {incident.entityInfo.entityId}, skipping incident"
                     )
-                    metrics.health_check_unknown_system_skipped.inc()
+                    metrics.dcgm_health_check_unknown_system_skipped.inc()
                     continue
 
                 health_status[watch_name].status = types.HealthStatus(int(incident.health))

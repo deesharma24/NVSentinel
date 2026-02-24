@@ -35,7 +35,7 @@ dcgm_api_failures = Counter(
     "Number of times an error has occurred",
     labelnames=["error_name"],
 )
-health_check_unknown_system_skipped = Counter(
-    "health_check_unknown_system_skipped",
-    "Number of health check incidents skipped due to unrecognized system value",
+dcgm_health_check_unknown_system_skipped = Counter(
+    "dcgm_health_check_unknown_system_skipped",
+    "Number of DCGM health check incidents skipped due to unrecognized system value",
 )
