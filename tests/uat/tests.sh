@@ -313,10 +313,10 @@ test_gpu_monitoring_dcgm() {
     fi
     log "Node event verified: GpuPowerWatch is non-fatal, appears in events ✓"
 
-    # XID 95 results in A DCGM_FR_UNCONTAINED_ERROR from GpuMemWatch which requires a RESTART_VM action
+    # XID 95 results in DCGM_FR_UNCONTAINED_ERROR from GpuAllWatch which requires a RESTART_VM action.
     kubectl exec -n gpu-operator "$dcgm_pod" -- dcgmi test --inject --gpuid 0 -f 230 -v 95
 
-    wait_for_node_condition "$gpu_node" "GpuMemWatch"
+    wait_for_node_condition "$gpu_node" "GpuAllWatch"
 
     wait_for_node_quarantine "$gpu_node"
 
