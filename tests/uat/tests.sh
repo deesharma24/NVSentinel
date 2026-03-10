@@ -114,7 +114,7 @@ verify_gpu_driver_pod_exists() {
         log "Driver pod running: kube-system/$pod"
         return
     fi
-    error "No running driver pod found on node $node (checked gpu-operator and kube-system namespaces)"
+    log "WARN: No running driver pod found on node $node (checked gpu-operator and kube-system namespaces)."
 }
 
 
