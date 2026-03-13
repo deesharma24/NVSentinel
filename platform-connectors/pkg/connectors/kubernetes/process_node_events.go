@@ -232,14 +232,68 @@ func parseMessages(message string) []string {
 
 func (r *K8sConnector) addMessageIfNotExist(messages []string, healthEvent *protos.HealthEvent) []string {
 	newMessage := r.constructHealthEventMessage(healthEvent)
+	trimmed := newMessage[:len(newMessage)-1]
 
-	for _, msg := range messages {
-		if fmt.Sprintf("%s;", msg) == newMessage {
+	for i, msg := range messages {
+		if messagesMatchByIdentity(msg, trimmed) {
+			messages[i] = trimmed
+
 			return messages
 		}
 	}
 
-	return append(messages, newMessage[:len(newMessage)-1])
+	return append(messages, trimmed)
+}
+
+// extractMessageIdentity parses ErrorCodes, entity tokens (GPU, PCI, GPU_UUID),
+// and Recommended Action from a node condition message. Works on both full and
+// compacted messages.
+func extractMessageIdentity(msg string) (errorCodes []string, entities []string, recommendedAction string) {
+	raIdx := strings.LastIndex(msg, recommendedActionMarker)
+	if raIdx >= 0 {
+		recommendedAction = strings.TrimRight(msg[raIdx:], " ")
+	}
+
+	prefix := msg
+	if raIdx >= 0 {
+		prefix = msg[:raIdx]
+	}
+
+	for _, token := range strings.Fields(prefix) {
+		switch {
+		case strings.HasPrefix(token, "ErrorCode:"):
+			errorCodes = append(errorCodes, token)
+		case strings.HasPrefix(token, "GPU:") ||
+			strings.HasPrefix(token, "PCI:") ||
+			strings.HasPrefix(token, "GPU_UUID:"):
+			entities = append(entities, token)
+		}
+	}
+
+	return errorCodes, entities, recommendedAction
+}
+
+// messagesMatchByIdentity returns true if two messages represent the same fault:
+// same ErrorCodes, same Recommended Action, and at least one shared entity
+// (GPU, PCI, or GPU_UUID). Entity any-match handles the case where GPU_UUID is
+// truncated by compaction but GPU or PCI identifiers still match.
+func messagesMatchByIdentity(a, b string) bool {
+	aErr, aEnt, aRA := extractMessageIdentity(a)
+	bErr, bEnt, bRA := extractMessageIdentity(b)
+
+	if aRA != bRA || !slices.Equal(aErr, bErr) {
+		return false
+	}
+
+	for _, ae := range aEnt {
+		for _, be := range bEnt {
+			if ae == be {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (r *K8sConnector) removeImpactedEntitiesMessages(messages []string,
