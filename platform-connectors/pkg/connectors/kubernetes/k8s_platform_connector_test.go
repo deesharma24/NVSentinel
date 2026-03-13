@@ -1678,9 +1678,9 @@ func TestTruncateConditionMessage(t *testing.T) {
 		var msgs []string
 		for i := 0; i < count; i++ {
 			msgs = append(msgs, fmt.Sprintf(
-				"ErrorCode:DCGM_FR_NVLINK_DOWN GPU:%d PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427ec "+
+				"ErrorCode:DCGM_FR_NVLINK_DOWN GPU:%d PCI:0000:c%d:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d04344270%d "+
 					"GPU %d's NvLink link 0 is currently down Check DCGM and system logs for errors. Reset GPU. Restart DCGM. Rerun diagnostics. "+
-					"Recommended Action=RESTART_VM", i, i))
+					"Recommended Action=RESTART_VM", i, i+1, i, i))
 		}
 		return msgs
 	}
@@ -1785,12 +1785,17 @@ func TestTruncateConditionMessage(t *testing.T) {
 func TestTruncateConditionMessage_EntityIdentifierPreservation(t *testing.T) {
 	connector := &K8sConnector{config: K8sConnectorConfig{MaxNodeConditionMessageLength: 1024, CompactedHealthEventMsgLen: 72}}
 
+	pciAddresses := []string{
+		"0000:c1:00.0", "0000:c2:00.0", "0000:c3:00.0", "0000:c4:00.0",
+		"0000:c5:00.0", "0000:c6:00.0", "0000:c7:00.0", "0000:c8:00.0",
+	}
+
 	var msgs []string
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, fmt.Sprintf(
-			"ErrorCode:DCGM_FR_NVLINK_DOWN GPU:%d PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427ec "+
+			"ErrorCode:DCGM_FR_NVLINK_DOWN GPU:%d PCI:%s GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427e%d "+
 				"GPU %d's NvLink link 0 is currently down Check DCGM and system logs for errors. Reset GPU. Restart DCGM. Rerun diagnostics. "+
-				"Recommended Action=RESTART_VM", i, i))
+				"Recommended Action=RESTART_VM", i, pciAddresses[i], i, i))
 	}
 
 	result := connector.truncateNodeConditionMessage(msgs)
@@ -1800,9 +1805,9 @@ func TestTruncateConditionMessage_EntityIdentifierPreservation(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		assert.Contains(t, result, fmt.Sprintf("GPU:%d ", i),
 			"GPU %d identifier must survive compaction for clearing", i)
+		assert.Contains(t, result, fmt.Sprintf("PCI:%s", pciAddresses[i]),
+			"PCI identifier for GPU %d must survive compaction for clearing", i)
 	}
-	assert.Contains(t, result, "PCI:0000:c4:00.0",
-		"PCI identifier must survive compaction for clearing")
 	assert.Contains(t, result, "ErrorCode:DCGM_FR_NVLINK_DOWN",
 		"Error code must be preserved")
 	assert.Contains(t, result, "Recommended Action=RESTART_VM",
@@ -1866,4 +1871,69 @@ func TestMessagesMatchByIdentity(t *testing.T) {
 			assert.Equal(t, tc.match, result)
 		})
 	}
+}
+
+func TestDeduplicationBehavior(t *testing.T) {
+	msgOld := "ErrorCode:119 PCI:0002:00:00 GPU_UUID:GPU-22222222-2222-2222-2222-222222222222 " +
+		"kernel: [16450076.435595] NVRM: Xid (PCI:0002:00:00): 119, pid=1582259 Recommended Action=COMPONENT_RESET"
+	msgNew := "ErrorCode:119 PCI:0002:00:00 GPU_UUID:GPU-22222222-2222-2222-2222-222222222222 " +
+		"kernel: [16450077.123456] NVRM: Xid (PCI:0002:00:00): 119, pid=9999999 Recommended Action=COMPONENT_RESET"
+	msgUnrelated := "ErrorCode:79 PCI:0001:00:00 GPU_UUID:GPU-11111111-1111-1111-1111-111111111111 " +
+		"kernel: [16450078.000000] NVRM: Xid (PCI:0001:00:00): 79 Recommended Action=CONTACT_SUPPORT"
+
+	t.Run("Exact duplicate always blocked by addMessageIfNotExist", func(t *testing.T) {
+		connector := NewK8sConnector(nil, nil, nil, context.Background(), K8sConnectorConfig{
+			MaxNodeConditionMessageLength: 4096,
+			CompactedHealthEventMsgLen:    72,
+		})
+
+		event := &protos.HealthEvent{
+			ErrorCode:         []string{"119"},
+			EntitiesImpacted:  []*protos.Entity{{EntityType: "PCI", EntityValue: "0002:00:00"}},
+			Message:           "kernel: same message",
+			RecommendedAction: protos.RecommendedAction_COMPONENT_RESET,
+		}
+
+		msgs := connector.addMessageIfNotExist(nil, event)
+		require.Len(t, msgs, 1, "First add should create 1 entry")
+
+		msgs = connector.addMessageIfNotExist(msgs, event)
+		assert.Len(t, msgs, 1, "Exact same event should not create a second entry")
+	})
+
+	t.Run("Below limit - different timestamps preserved as separate entries", func(t *testing.T) {
+		connector := &K8sConnector{config: K8sConnectorConfig{
+			MaxNodeConditionMessageLength: 4096,
+			CompactedHealthEventMsgLen:    72,
+		}}
+
+		messages := []string{msgOld, msgUnrelated, msgNew}
+		result := connector.truncateNodeConditionMessage(messages)
+
+		assert.Contains(t, result, "pid=1582259", "Old message should be preserved below limit")
+		assert.Contains(t, result, "pid=9999999", "New message should be preserved below limit")
+		assert.Contains(t, result, "ErrorCode:79", "Unrelated message should be preserved")
+	})
+
+	t.Run("Above limit - identity duplicates consolidated keeping freshest", func(t *testing.T) {
+		connector := &K8sConnector{config: K8sConnectorConfig{
+			MaxNodeConditionMessageLength: 300,
+			CompactedHealthEventMsgLen:    72,
+		}}
+
+		messages := []string{msgOld, msgUnrelated, msgNew}
+		result := connector.truncateNodeConditionMessage(messages)
+		parts := strings.Split(result, ";")
+		count := 0
+
+		for _, part := range parts {
+			if strings.Contains(part, "ErrorCode:119") && strings.Contains(part, "PCI:0002:00:00") {
+				count++
+			}
+		}
+
+		assert.Equal(t, 1, count, "Should have exactly 1 entry for ErrorCode:119 PCI:0002:00:00 after dedup")
+		assert.Contains(t, result, "ErrorCode:79", "Unrelated message should survive dedup")
+		assert.NotContains(t, result, "pid=1582259", "Older duplicate should be dropped")
+	})
 }
