@@ -232,17 +232,14 @@ func parseMessages(message string) []string {
 
 func (r *K8sConnector) addMessageIfNotExist(messages []string, healthEvent *protos.HealthEvent) []string {
 	newMessage := r.constructHealthEventMessage(healthEvent)
-	trimmed := newMessage[:len(newMessage)-1]
 
-	for i, msg := range messages {
-		if messagesMatchByIdentity(msg, trimmed) {
-			messages[i] = trimmed
-
+	for _, msg := range messages {
+		if fmt.Sprintf("%s;", msg) == newMessage {
 			return messages
 		}
 	}
 
-	return append(messages, trimmed)
+	return append(messages, newMessage[:len(newMessage)-1])
 }
 
 // extractMessageIdentity parses ErrorCodes, entity tokens (GPU, PCI, GPU_UUID),
@@ -264,8 +261,7 @@ func extractMessageIdentity(msg string) (errorCodes []string, entities []string,
 		case strings.HasPrefix(token, "ErrorCode:"):
 			errorCodes = append(errorCodes, token)
 		case strings.HasPrefix(token, "GPU:") ||
-			strings.HasPrefix(token, "PCI:") ||
-			strings.HasPrefix(token, "GPU_UUID:"):
+			strings.HasPrefix(token, "PCI:"):
 			entities = append(entities, token)
 		}
 	}
@@ -294,6 +290,31 @@ func messagesMatchByIdentity(a, b string) bool {
 	}
 
 	return false
+}
+
+// deduplicateMessagesByIdentity removes identity-duplicate messages, keeping the
+// last (freshest) occurrence. This is only called when total message length
+// exceeds the node condition limit, to reclaim space before compaction.
+func deduplicateMessagesByIdentity(messages []string) []string {
+	var result []string
+
+	for i, msg := range messages {
+		duplicate := false
+
+		for j := i + 1; j < len(messages); j++ {
+			if messagesMatchByIdentity(msg, messages[j]) {
+				duplicate = true
+
+				break
+			}
+		}
+
+		if !duplicate {
+			result = append(result, msg)
+		}
+	}
+
+	return result
 }
 
 func (r *K8sConnector) removeImpactedEntitiesMessages(messages []string,
@@ -732,8 +753,11 @@ func compactMessageField(msg string, maxLen int) string {
 func (r *K8sConnector) truncateNodeConditionMessage(messages []string) string {
 	maxLen := int(r.config.MaxNodeConditionMessageLength)
 
-	// Tier 1: if full messages exceed the limit, compact the free-text fields.
+	// When messages exceed the limit, first remove identity-duplicates (same
+	// ErrorCode + entity + Recommended Action) to reclaim space, then compact.
 	if totalMessageLength(messages) > maxLen {
+		messages = deduplicateMessagesByIdentity(messages)
+
 		compacted := make([]string, len(messages))
 		for i, msg := range messages {
 			compacted[i] = compactMessageField(msg, int(r.config.CompactedHealthEventMsgLen))

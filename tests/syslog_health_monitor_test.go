@@ -193,7 +193,7 @@ func TestSyslogHealthMonitorXIDDetection(t *testing.T) {
 		t.Logf("Injecting %d additional XID messages (includes 1 duplicate) to exceed 1KB limit", len(additionalXidMessages))
 		helpers.InjectSyslogMessages(t, helpers.StubJournalHTTPPort, additionalXidMessages)
 
-		t.Log("Verifying truncation and dedup: message <= 1KB, has '...' suffix, no duplicate entries")
+		t.Log("Verifying compaction and dedup: message <= 1KB, no '...' suffix, no duplicate entries")
 		require.Eventually(t, func() bool {
 			condition, err := helpers.CheckNodeConditionExists(ctx, client, nodeName,
 				"SysLogsXIDError", "SysLogsXIDErrorIsNotHealthy")
@@ -204,18 +204,18 @@ func TestSyslogHealthMonitorXIDDetection(t *testing.T) {
 
 			messageLen := len(condition.Message)
 
+			if !strings.Contains(condition.Message, "ErrorCode:79") {
+				t.Logf("Waiting for all messages to be processed (%d bytes so far)", messageLen)
+				return false
+			}
+
 			if messageLen > maxConditionMessageLength {
 				t.Logf("FAIL: Message length %d exceeds max %d", messageLen, maxConditionMessageLength)
 				return false
 			}
 
-			if !strings.HasSuffix(condition.Message, truncationSuffix) {
-				t.Logf("FAIL: Message should end with truncation suffix '%s'", truncationSuffix)
-				return false
-			}
-
-			if !strings.Contains(condition.Message, "ErrorCode:119") {
-				t.Logf("FAIL: Message should contain ErrorCode:119 from first inject")
+			if strings.HasSuffix(condition.Message, truncationSuffix) {
+				t.Logf("Waiting for dedup to settle (%d bytes, still has '%s')", messageLen, truncationSuffix)
 				return false
 			}
 
@@ -234,11 +234,34 @@ func TestSyslogHealthMonitorXIDDetection(t *testing.T) {
 				return false
 			}
 
-			t.Logf("PASS: %d bytes, truncated with '%s', dedup verified (1 entry for XID 119/PCI:0002:00:00)",
-				messageLen, truncationSuffix)
+			t.Logf("PASS: %d bytes, compacted without hard truncation, dedup verified", messageLen)
 			return true
 		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
-			"Node condition message should be truncated to 1KB with no duplicates")
+			"10 compacted entries should fit within 1KB without hard truncation")
+
+		return ctx
+	})
+
+	feature.Assess("Inject one more XID to trigger hard truncation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err, "failed to create kubernetes client")
+
+		nodeName := ctx.Value(keySyslogNodeName).(string)
+
+		helpers.InjectSyslogMessages(t, helpers.StubJournalHTTPPort, []string{
+			"kernel: [16450076.435595] NVRM: Xid (PCI:0001:00:00): 94, pid=789101, name=process, Contained ECC error.",
+		})
+
+		require.Eventually(t, func() bool {
+			condition, err := helpers.CheckNodeConditionExists(ctx, client, nodeName,
+				"SysLogsXIDError", "SysLogsXIDErrorIsNotHealthy")
+			if err != nil || condition == nil {
+				return false
+			}
+
+			return len(condition.Message) <= 1024 && strings.HasSuffix(condition.Message, "...")
+		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
+			"11th entry should trigger hard truncation with '...' suffix")
 
 		return ctx
 	})
