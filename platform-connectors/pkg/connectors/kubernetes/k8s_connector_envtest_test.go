@@ -30,7 +30,10 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
-const defaultMaxNodeConditionMessageLength = int64(1024)
+var defaultConnectorConfig = K8sConnectorConfig{
+	MaxNodeConditionMessageLength: 1024,
+	CompactedHealthEventMsgLen:    72,
+}
 
 // go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
 // source <(setup-envtest use -p env)
@@ -64,7 +67,7 @@ func TestK8sConnector_WithEnvtest_NodeConditionUpdate(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -146,7 +149,7 @@ func TestK8sConnector_WithEnvtest_NodeConditionClear(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -203,7 +206,7 @@ func TestK8sConnector_WithEnvtest_NodeEventCreation(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -272,7 +275,7 @@ func TestK8sConnector_WithEnvtest_AddMessages(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := []*protos.HealthEvent{
 		{
@@ -332,7 +335,7 @@ func TestK8sConnector_WithEnvtest_RemoveMessages(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := []*protos.HealthEvent{
 		{
@@ -378,7 +381,7 @@ func TestK8sConnector_WithEnvtest_MultipleEventsForSameNode(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEventsProto := &protos.HealthEvents{
 		Events: []*protos.HealthEvent{
@@ -463,7 +466,7 @@ func TestK8sConnector_WithEnvtest_TransitionTimeUpdates(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := []*protos.HealthEvent{
 		{
@@ -511,7 +514,7 @@ func TestK8sConnector_WithEnvtest_EventCountIncrement(t *testing.T) {
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvent := &protos.HealthEvent{
 		CheckName:          "GpuThermalWatch",
@@ -563,7 +566,7 @@ func TestK8sConnector_WithEnvtest_NodeNotFound(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -607,7 +610,7 @@ func TestK8sConnector_WithEnvtest_EmptyHealthEvents(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -636,7 +639,7 @@ func TestK8sConnector_WithEnvtest_MultipleEntities(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -700,7 +703,7 @@ func TestK8sConnector_WithEnvtest_SpecialCharactersInMessage(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
@@ -756,7 +759,7 @@ func TestK8sConnector_WithEnvtest_MultipleCheckTypes(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultMaxNodeConditionMessageLength)
+	k8sConn := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
 
 	healthEvents := &protos.HealthEvents{
 		Version: 1,
