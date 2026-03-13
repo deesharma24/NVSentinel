@@ -1808,3 +1808,62 @@ func TestTruncateConditionMessage_EntityIdentifierPreservation(t *testing.T) {
 	assert.Contains(t, result, "Recommended Action=RESTART_VM",
 		"Recommended action must be preserved")
 }
+
+func TestMessagesMatchByIdentity(t *testing.T) {
+	tests := []struct {
+		name  string
+		a     string
+		b     string
+		match bool
+	}{
+		{
+			name:  "Full vs compacted - GPU and PCI match",
+			a:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427ec GPU 3's NvLink link 0 down Recommended Action=RESTART_VM",
+			b:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 GPU_UUID:GPU-8614c... Recommended Action=RESTART_VM",
+			match: true,
+		},
+		{
+			name:  "Same GPU different NvLink - same fault identity",
+			a:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427ec GPU 3's NvLink link 0 down Recommended Action=RESTART_VM",
+			b:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9-371d-1d8a-9bab-78d0434427ec GPU 3's NvLink link 5 down Recommended Action=RESTART_VM",
+			match: true,
+		},
+		{
+			name:  "Different GPU - no match",
+			a:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 Recommended Action=RESTART_VM",
+			b:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:4 PCI:0000:c5:00.0 Recommended Action=RESTART_VM",
+			match: false,
+		},
+		{
+			name:  "Different ErrorCode - no match",
+			a:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 Recommended Action=RESTART_VM",
+			b:     "ErrorCode:DCGM_FR_CORRUPT_INFOROM GPU:3 PCI:0000:c4:00.0 Recommended Action=RESTART_VM",
+			match: false,
+		},
+		{
+			name:  "Different Recommended Action - no match",
+			a:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 Recommended Action=RESTART_VM",
+			b:     "ErrorCode:DCGM_FR_NVLINK_DOWN GPU:3 PCI:0000:c4:00.0 Recommended Action=CONTACT_SUPPORT",
+			match: false,
+		},
+		{
+			name:  "No Recommended Action in either - still matches on ErrorCode and entity",
+			a:     "ErrorCode:119 PCI:0002:00:00 GPU_UUID:GPU-22222222 kernel: some text",
+			b:     "ErrorCode:119 PCI:0002:00:00 GPU_UUID:GPU-22222... kernel: other text",
+			match: true,
+		},
+		{
+			name:  "No entities in common - no match",
+			a:     "ErrorCode:119 PCI:0002:00:00 Recommended Action=COMPONENT_RESET",
+			b:     "ErrorCode:119 PCI:0003:00:00 Recommended Action=COMPONENT_RESET",
+			match: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := messagesMatchByIdentity(tc.a, tc.b)
+			assert.Equal(t, tc.match, result)
+		})
+	}
+}
