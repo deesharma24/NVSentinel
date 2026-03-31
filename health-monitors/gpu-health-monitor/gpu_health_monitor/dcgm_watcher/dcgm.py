@@ -273,7 +273,8 @@ class DCGMWatcher:
             log.info(f"dcgm gpu_id are {gpu_ids}")
 
             return dcgm_group, gpu_ids, gpu_serials
-        except Exception:
+        except Exception as e:
+            log.warning(f"DCGM monitoring initialization failed, rolling back group: {e}")
             try:
                 dcgm_group.Delete()
             except Exception as del_err:
