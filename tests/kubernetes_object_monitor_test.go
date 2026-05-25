@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
@@ -38,6 +40,18 @@ const (
 	testConditionType        = "TestCondition"
 	gpuOperatorNamespace     = "gpu-operator"
 	gpuOperatorPodPolicyName = "gpu-operator-pod-health"
+
+	awsRoceEniPolicyName    = "aws-roce-eni-cache-miss"
+	awsRoceEniTestPodName   = "test-pod-aws-roce-eni-cache-miss"
+	awsRoceEniTestEventName = "test-event-aws-roce-eni-cache-miss"
+
+	// Mirrors the kubelet-emitted FailedCreatePodSandbox message seen in
+	// NKX-9906 on AWS GB300. The substrings "RoCE ENI with MAC address" and
+	// "not found in AWS client cache" are what the policy predicate matches.
+	awsRoceEniMockMessage = `Failed to create pod sandbox: rpc error: code = Unknown desc = ` +
+		`failed to setup network for sandbox "deadbeef": plugin type="aws-cni" failed (add): ` +
+		`add cmd: Error received from AddNetwork gRPC call: rpc error: code = Unknown desc = ` +
+		`RoCE ENI with MAC address 02:fe:9b:de:ab:cd not found in AWS client cache`
 )
 
 func TestKubernetesObjectMonitor(t *testing.T) {
@@ -684,6 +698,189 @@ func TestKubernetesObjectMonitorMainContainerFailures(t *testing.T) {
 
 		// Clean up DaemonSet
 		helpers.CleanupDaemonSet(ctx, t, client, gpuOperatorNamespace, dsName)
+
+		return ctx
+	})
+
+	testEnv.Test(t, feature.Feature())
+}
+
+// TestKubernetesObjectMonitorAWSRoceEniCacheMiss exercises the NKX-9906 detector
+// (aws-roce-eni-cache-miss policy in values.yaml). It synthesises the exact
+// Event signature that the kubelet emits when AWS VPC CNI fails the
+// AddNetwork RPC due to a stale/missing ENI MAC mapping, and verifies that
+// kubernetes-object-monitor publishes a fatal REPLACE_VM health event that
+// flows through fault-quarantine to cordon the node.
+func TestKubernetesObjectMonitorAWSRoceEniCacheMiss(t *testing.T) {
+	feature := features.New("Kubernetes Object Monitor - NKX-9906 AWS VPC CNI ENI cache miss").
+		WithLabel("suite", "kubernetes-object-monitor").
+		WithLabel("component", "aws-vpc-cni")
+
+	var (
+		testNodeName string
+		testPodUID   string
+	)
+
+	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		testNodeName, err = helpers.GetRealNodeName(ctx, client)
+		require.NoError(t, err, "failed to get real node name")
+		t.Logf("Using test worker node: %s", testNodeName)
+
+		err = helpers.CreateNamespace(ctx, client, gpuOperatorNamespace)
+		require.NoError(t, err, "failed to create namespace %s", gpuOperatorNamespace)
+
+		// Pre-bind the pod directly to the test node (spec.nodeName) so we
+		// skip scheduling latency. The pod's runtime state is irrelevant —
+		// the CEL nodeAssociation only reads spec.nodeName.
+		pod := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      awsRoceEniTestPodName,
+				Namespace: gpuOperatorNamespace,
+				Labels: map[string]string{
+					"test": "kubernetes-object-monitor-aws-roce-eni",
+				},
+			},
+			Spec: v1.PodSpec{
+				NodeName: testNodeName,
+				Containers: []v1.Container{
+					{
+						Name:    "main",
+						Image:   "busybox:latest",
+						Command: []string{"sh", "-c", "sleep 3600"},
+					},
+				},
+				RestartPolicy: v1.RestartPolicyNever,
+				Tolerations:   []v1.Toleration{{Operator: v1.TolerationOpExists}},
+			},
+		}
+		err = client.Resources().Create(ctx, pod)
+		require.NoError(t, err, "failed to create test pod")
+
+		// Re-fetch to obtain a stable UID for the Event's involvedObject.
+		var refreshed v1.Pod
+
+		err = client.Resources().Get(ctx, awsRoceEniTestPodName, gpuOperatorNamespace, &refreshed)
+		require.NoError(t, err, "failed to fetch test pod after create")
+		testPodUID = string(refreshed.UID)
+		t.Logf("Test pod ready: %s/%s (uid=%s) bound to node %s",
+			refreshed.Namespace, refreshed.Name, testPodUID, testNodeName)
+
+		return ctx
+	})
+
+	feature.Assess("Synthetic FailedCreatePodSandbox event triggers REPLACE_VM policy and cordons node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		now := metav1.Now()
+		event := &v1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      awsRoceEniTestEventName,
+				Namespace: gpuOperatorNamespace,
+			},
+			InvolvedObject: v1.ObjectReference{
+				Kind:       "Pod",
+				APIVersion: "v1",
+				Namespace:  gpuOperatorNamespace,
+				Name:       awsRoceEniTestPodName,
+				UID:        types.UID(testPodUID),
+			},
+			Reason:         "FailedCreatePodSandbox",
+			Message:        awsRoceEniMockMessage,
+			Type:           "Warning",
+			Source:         v1.EventSource{Component: "kubernetes-object-monitor-test"},
+			FirstTimestamp: now,
+			LastTimestamp:  now,
+			Count:          1,
+		}
+
+		err = client.Resources().Create(ctx, event)
+		require.NoError(t, err, "failed to create synthetic FailedCreatePodSandbox Event")
+		t.Logf("Created synthetic Event %s/%s referencing pod %s/%s",
+			event.Namespace, event.Name, gpuOperatorNamespace, awsRoceEniTestPodName)
+
+		t.Log("Waiting for kubernetes-object-monitor to publish REPLACE_VM health event " +
+			"(node should be cordoned with aws-roce-eni-cache-miss policy match)")
+		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: true,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: awsRoceEniPolicyName, ShouldExist: true},
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: true},
+			},
+		})
+		t.Log("SUCCESS: Event predicate matched, lookup() resolved pod->node, " +
+			"REPLACE_VM health event flowed through to fault-quarantine")
+
+		return ctx
+	})
+
+	feature.Assess("Event deletion clears policy match and uncordons node", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		eventToDelete := &v1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      awsRoceEniTestEventName,
+				Namespace: gpuOperatorNamespace,
+			},
+		}
+		err = client.Resources().Delete(ctx, eventToDelete)
+		require.NoError(t, err, "failed to delete synthetic Event")
+		t.Logf("Deleted synthetic Event %s/%s", gpuOperatorNamespace, awsRoceEniTestEventName)
+
+		t.Log("Waiting for node to uncordon and aws-roce-eni-cache-miss annotation to clear")
+		helpers.AssertQuarantineState(ctx, t, client, testNodeName, helpers.QuarantineAssertion{
+			ExpectCordoned: false,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.K8sObjectMonitorAnnotationKey, Pattern: awsRoceEniPolicyName, ShouldExist: false},
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: false},
+			},
+		})
+		t.Log("SUCCESS: Node uncordoned after Event deletion (recovery path verified)")
+
+		return ctx
+	})
+
+	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		// Best-effort: pod cleanup (fast deletion since Phase 2 may have left it).
+		gracePeriod := int64(0)
+		podToDelete := &v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:                       awsRoceEniTestPodName,
+				Namespace:                  gpuOperatorNamespace,
+				DeletionGracePeriodSeconds: &gracePeriod,
+			},
+		}
+		if delErr := client.Resources().Delete(ctx, podToDelete); delErr != nil {
+			t.Logf("Warning: failed to delete test pod %s: %v", awsRoceEniTestPodName, delErr)
+		}
+
+		// Best-effort: event cleanup (idempotent — Phase 2 already deletes it
+		// on the success path; this catches the failure path).
+		eventToDelete := &v1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      awsRoceEniTestEventName,
+				Namespace: gpuOperatorNamespace,
+			},
+		}
+		_ = client.Resources().Delete(ctx, eventToDelete)
+
+		// Best-effort: ensure node is uncordoned in case an assertion failed mid-test.
+		node, err := helpers.GetNodeByName(ctx, client, testNodeName)
+		if err != nil {
+			t.Logf("Warning: failed to get node %s for cleanup: %v", testNodeName, err)
+		} else if node.Spec.Unschedulable {
+			node.Spec.Unschedulable = false
+			if updateErr := client.Resources().Update(ctx, node); updateErr != nil {
+				t.Logf("Warning: failed to uncordon node %s during teardown: %v", testNodeName, updateErr)
+			}
+		}
 
 		return ctx
 	})

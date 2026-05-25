@@ -51,6 +51,35 @@ policies:
       errorCode:
         - NODE_NOT_READY
 
+  # NKX-9906: AWS VPC CNI cache miss on AWS GB300. kubelet's FailedCreatePodSandbox
+  # event carries the signature "RoCE ENI with MAC address ... not found in AWS
+  # client cache" when the CNI has a stale/missing ENI mapping after VM recreation.
+  # Remediation per AWS guidance is EC2 replacement, not reboot.
+  - name: aws-roce-eni-cache-miss
+    enabled: true
+    resource:
+      group: ""
+      version: v1
+      kind: Event
+    predicate:
+      expression: |
+        resource.reason == "FailedCreatePodSandbox" &&
+        resource.message.contains("RoCE ENI with MAC address") &&
+        resource.message.contains("not found in AWS client cache")
+    nodeAssociation:
+      expression: |
+        lookup('v1', 'Pod',
+          resource.involvedObject.namespace,
+          resource.involvedObject.name
+        ).spec.nodeName
+    healthEvent:
+      componentClass: AWS_VPC_CNI
+      isFatal: true
+      message: "AWS VPC CNI ENI cache miss (NKX-9906) - EC2 replacement required"
+      recommendedAction: REPLACE_VM
+      errorCode:
+        - AWS_ENI_CACHE_MISS
+
   # Example: Monitor a custom resource (e.g., a GPU Job)
   # Uncomment and modify to monitor your own custom resources
   #

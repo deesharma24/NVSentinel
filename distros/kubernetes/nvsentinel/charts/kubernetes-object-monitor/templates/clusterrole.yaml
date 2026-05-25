@@ -41,6 +41,16 @@ rules:
       - watch
       - patch
       - update
+  # Pods are read by CEL lookup() expressions that traverse Event -> Pod -> Node
+  # (e.g. resolving FailedCreatePodSandbox event back to its node). Granted
+  # statically since policies don't watch Pods directly.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
   # This loop automatically generates rules for all resources defined in your policies.
   {{- range $group, $resources := $resourcesByGroup }}
   {{- /* Skip nodes in core group since we already added it above */}}
