@@ -106,6 +106,14 @@ func TestMapActionStringToProto(t *testing.T) {
 			expectedOutput: pb.RecommendedAction_COMPONENT_RESET,
 		},
 		{
+			input:          "RECOVER_FEATURE_RESET_GPU",
+			expectedOutput: pb.RecommendedAction_COMPONENT_RESET,
+		},
+		{
+			input:          "WORKFLOW_XID_168",
+			expectedOutput: pb.RecommendedAction_RESTART_VM,
+		},
+		{
 			input:          "NONE",
 			expectedOutput: pb.RecommendedAction_NONE,
 		},
