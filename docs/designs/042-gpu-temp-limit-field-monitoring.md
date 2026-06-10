@@ -8,7 +8,7 @@ NVSentinel currently uses the DCGM health watch `DCGM_HEALTH_WATCH_THERMAL` to m
 - On each `health.Check()`, it compares the latest TVIOL sample to the earliest sample in the lookback window.
 - If TVIOL increased, DCGM emits a thermal warning for that GPU.
 
-The problem with the above logic is that there is no clarity on how far GPU temperatures crossed the thermal margin, whether the cause is workload or hardware, and whether the GPU node needs to be RMA'd. It does not provide quantifiable data on the severity of the issue.
+The problem with the above logic is that there is no clarity on how far GPU temperatures crossed the thermal margin, whether the cause is workload or hardware. It does not provide quantifiable data on the severity of the issue.
 
 Hence, as part of this ADR, the idea is to use `DCGM_FI_DEV_GPU_TEMP_LIMIT` as a signed thermal-margin signal to decide whether thermal headroom has crossed the hardware slowdown boundary.
 
