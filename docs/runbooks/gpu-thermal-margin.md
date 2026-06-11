@@ -41,7 +41,7 @@ kubectl exec -n nvsentinel <GPU_MONITOR_POD> -- nvidia-smi -q -d TEMPERATURE -i 
 ```
 
 - If the GPU is genuinely hot (low/negative margin, temperature crossing the slowdown limit), this is a real thermal fault. Go to step 5.
-- If the GPU is cool and the margin is healthy but the condition still fired, suspect a bad or stale threshold in metadata. Go to step 3.
+- If the GPU is cool and the margin is healthy but the condition still fired, this could indicate transient environmental conditions (ambient temp etc.) or a hardware issue. To verify, go to step 5 and run the respective dcgmproftester and nvidia-smi-related commands to decide the next steps.
 
 ### 3. Inspect the Per-GPU Slowdown Threshold (Metadata)
 
