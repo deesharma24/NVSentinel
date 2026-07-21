@@ -123,23 +123,23 @@ verify_gpu_driver_pod_exists() {
 # pod-local embedded engine, the GPU Operator DCGM service (node-local via
 # internalTrafficPolicy: Local), or an external host engine. Set
 # UAT_DCGM_HOST to override the dcgmi --host value.
-# Sets: DCGM_NS, DCGM_POD, DCGM_HOST
+# Sets: GPU_HM_NS, GPU_HM_POD, DCGM_HOST
 discover_dcgm_target() {
     local node=$1
 
-    DCGM_NS=nvsentinel
-    DCGM_POD=$(kubectl get pods -n "$DCGM_NS" -l app.kubernetes.io/name=gpu-health-monitor \
+    GPU_HM_NS=nvsentinel
+    GPU_HM_POD=$(kubectl get pods -n "$GPU_HM_NS" -l app.kubernetes.io/name=gpu-health-monitor \
         --field-selector=status.phase=Running \
         -o jsonpath="{.items[?(@.spec.nodeName=='$node')].metadata.name}" 2>/dev/null | head -1)
-    if [[ -z "$DCGM_POD" ]]; then
+    if [[ -z "$GPU_HM_POD" ]]; then
         error "No running gpu-health-monitor pod on node $node"
     fi
 
     local dcgm_addr
-    dcgm_addr=$(kubectl get pod -n "$DCGM_NS" "$DCGM_POD" -o json 2>/dev/null \
+    dcgm_addr=$(kubectl get pod -n "$GPU_HM_NS" "$GPU_HM_POD" -o json 2>/dev/null \
         | jq -r '.spec.containers[0].args // [] | index("--dcgm-addr") as $i | if $i then .[$i + 1] else empty end')
     DCGM_HOST=${UAT_DCGM_HOST:-${dcgm_addr:-localhost:5555}}
-    log "Using monitor pod for DCGM injection: $DCGM_NS/$DCGM_POD (dcgmi host: $DCGM_HOST)"
+    log "Using monitor pod for DCGM injection: $GPU_HM_NS/$GPU_HM_POD (dcgmi host: $DCGM_HOST)"
 }
 
 # Privileged helper pod for node-level test operations (/dev/kmsg writes,
@@ -387,7 +387,7 @@ test_gpu_monitoring_dcgm() {
 
     discover_dcgm_target "$gpu_node"
 
-    kubectl exec -n "$DCGM_NS" "$DCGM_POD" -- dcgmi test --host "$DCGM_HOST" --inject --gpuid 0 -f 240 -v 99999 # power watch error
+    kubectl exec -n "$GPU_HM_NS" "$GPU_HM_POD" -- dcgmi test --host "$DCGM_HOST" --inject --gpuid 0 -f 240 -v 99999 # power watch error
 
     log "Waiting for node events to appear..."
     local max_wait=${UAT_EVENT_TIMEOUT:-30}
@@ -414,7 +414,7 @@ test_gpu_monitoring_dcgm() {
     # XID 95 results in DCGM_FR_UNCONTAINED_ERROR which requires a RESTART_VM action.
     # DCGM 4.2.x maps this to DCGM_HEALTH_WATCH_MEM (GpuMemWatch).
     # DCGM 4.4.x+ reclassified it as a "devastating" XID under DCGM_HEALTH_WATCH_ALL (GpuAllWatch).
-    kubectl exec -n "$DCGM_NS" "$DCGM_POD" -- dcgmi test --host "$DCGM_HOST" --inject --gpuid 0 -f 230 -v 95
+    kubectl exec -n "$GPU_HM_NS" "$GPU_HM_POD" -- dcgmi test --host "$DCGM_HOST" --inject --gpuid 0 -f 230 -v 95
 
     wait_for_any_node_condition "$gpu_node" "GpuAllWatch" "GpuMemWatch"
 
@@ -583,7 +583,7 @@ test_sxid_monitoring_syslog() {
     log "Injecting SXID error messages via /dev/kmsg on pod: $NODE_NS/$NODE_POD"
 
     log "  - SXID 28002 (Non-fatal): Therm Warn Deactivated on Link $link_number"
-    kubectl exec -n "$NODE_NS" "$NODE_POD" -- sh -c "echo '<3>nvidia-nvswitch0: SXid (PCI:${pci_id}): 28002, Non-fatal, Link ${link_number} Therm Warn Deactivated' > /dev/kmsg"
+    kubectl exec -n "$NODE_NS" "$NODE_POD" -- sh -c "echo '<3>[6085126.134786] nvidia-nvswitch0: SXid (PCI:${pci_id}): 28002, Non-fatal, Link ${link_number} Therm Warn Deactivated' > /dev/kmsg"
 
     local max_wait=${UAT_EVENT_TIMEOUT:-30}
     local waited=0
@@ -606,7 +606,7 @@ test_sxid_monitoring_syslog() {
     log "Node event verified: SysLogsSXIDError ✓"
 
     log "  - SXID 20034 (Fatal): LTSSM Fault Up on Link $link_number"
-    kubectl exec -n "$NODE_NS" "$NODE_POD" -- sh -c "echo '<3>nvidia-nvswitch3: SXid (PCI:${pci_id}): 20034, Fatal, Link ${link_number} LTSSM Fault Up' > /dev/kmsg"
+    kubectl exec -n "$NODE_NS" "$NODE_POD" -- sh -c "echo '<3>[6085126.134786] nvidia-nvswitch3: SXid (PCI:${pci_id}): 20034, Fatal, Link ${link_number} LTSSM Fault Up' > /dev/kmsg"
 
     wait_for_node_condition "$gpu_node" "SysLogsSXIDError"
 
