@@ -149,12 +149,9 @@ create_node_debug_pod() {
     local node=$1
 
     NODE_NS=nvsentinel
-    NODE_POD=uat-node-debug
+    NODE_POD=$(sed "s|NODE_NAME|$node|" "${SCRIPT_DIR}/nvsentinel-debug-pod-template.yaml" \
+        | kubectl create -f - -o jsonpath='{.metadata.name}')
     trap 'delete_node_debug_pod' EXIT
-
-    kubectl delete pod -n "$NODE_NS" "$NODE_POD" --ignore-not-found --wait=true >/dev/null
-
-    sed "s|NODE_NAME|$node|" "${SCRIPT_DIR}/nvsentinel-debug-pod-template.yaml" | kubectl apply -f -
 
     if ! kubectl wait --for=condition=Ready pod -n "$NODE_NS" "$NODE_POD" --timeout=120s >/dev/null; then
         error "Debug pod $NODE_NS/$NODE_POD did not become Ready on node $node"
@@ -163,7 +160,7 @@ create_node_debug_pod() {
 }
 
 delete_node_debug_pod() {
-    kubectl delete pod -n "${NODE_NS:-nvsentinel}" "${NODE_POD:-uat-node-debug}" --ignore-not-found --wait=false >/dev/null
+    kubectl delete pod -n "${NODE_NS:-nvsentinel}" "$NODE_POD" --ignore-not-found --wait=false >/dev/null
     trap - EXIT
     log "Node debug pod deleted"
 }

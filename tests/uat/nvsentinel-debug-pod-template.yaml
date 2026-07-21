@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: uat-node-debug
+  generateName: uat-node-debug-
   namespace: nvsentinel
   labels:
     app.kubernetes.io/name: uat-node-debug
